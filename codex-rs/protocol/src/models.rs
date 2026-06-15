@@ -876,7 +876,14 @@ pub enum ResponseItem {
         status: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        size: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         revised_prompt: Option<String>,
+        #[serde(default)]
         result: String,
     },
     #[serde(alias = "compaction_summary")]
@@ -1739,6 +1746,8 @@ mod tests {
             ResponseItem::ImageGenerationCall {
                 id: "ig_123".to_string(),
                 status: "completed".to_string(),
+                model: None,
+                size: None,
                 revised_prompt: Some("A small blue square".to_string()),
                 result: "Zm9v".to_string(),
             }
@@ -1760,8 +1769,58 @@ mod tests {
             ResponseItem::ImageGenerationCall {
                 id: "ig_123".to_string(),
                 status: "completed".to_string(),
+                model: None,
+                size: None,
                 revised_prompt: None,
                 result: "Zm9v".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn response_item_parses_pending_image_generation_call_without_result() {
+        let item = serde_json::from_value::<ResponseItem>(serde_json::json!({
+            "id": "ig_123",
+            "type": "image_generation_call",
+            "status": "in_progress",
+        }))
+        .expect("pending image generation item should deserialize");
+
+        assert_eq!(
+            item,
+            ResponseItem::ImageGenerationCall {
+                id: "ig_123".to_string(),
+                status: "in_progress".to_string(),
+                model: None,
+                size: None,
+                revised_prompt: None,
+                result: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn response_item_parses_image_generation_call_metadata() {
+        let item = serde_json::from_value::<ResponseItem>(serde_json::json!({
+            "id": "ig_with_metadata",
+            "type": "image_generation_call",
+            "status": "completed",
+            "model": "gpt-image-2",
+            "size": "1024x1536",
+            "revised_prompt": "A tall image",
+            "result": "abc",
+        }))
+        .expect("image generation metadata should deserialize");
+
+        assert_eq!(
+            item,
+            ResponseItem::ImageGenerationCall {
+                id: "ig_with_metadata".to_string(),
+                status: "completed".to_string(),
+                model: Some("gpt-image-2".to_string()),
+                size: Some("1024x1536".to_string()),
+                revised_prompt: Some("A tall image".to_string()),
+                result: "abc".to_string(),
             }
         );
     }

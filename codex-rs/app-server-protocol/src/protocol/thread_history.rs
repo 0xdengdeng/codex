@@ -585,6 +585,8 @@ impl ThreadHistoryBuilder {
         let item = ThreadItem::ImageGeneration {
             id: payload.call_id.clone(),
             status: String::new(),
+            model: payload.model.clone(),
+            size: payload.size.clone(),
             revised_prompt: None,
             result: String::new(),
             saved_path: None,
@@ -596,6 +598,8 @@ impl ThreadHistoryBuilder {
         let item = ThreadItem::ImageGeneration {
             id: payload.call_id.clone(),
             status: payload.status.clone(),
+            model: payload.model.clone(),
+            size: payload.size.clone(),
             revised_prompt: payload.revised_prompt.clone(),
             result: payload.result.clone(),
             saved_path: payload.saved_path.clone(),
@@ -1432,6 +1436,8 @@ mod tests {
             RolloutItem::EventMsg(EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
                 call_id: "ig_123".into(),
                 status: "completed".into(),
+                model: Some("gpt-image-2".into()),
+                size: Some("1024x1536".into()),
                 revised_prompt: Some("final prompt".into()),
                 result: "Zm9v".into(),
                 saved_path: Some(test_path_buf("/tmp/ig_123.png").abs()),
@@ -1468,6 +1474,8 @@ mod tests {
                     ThreadItem::ImageGeneration {
                         id: "ig_123".into(),
                         status: "completed".into(),
+                        model: Some("gpt-image-2".into()),
+                        size: Some("1024x1536".into()),
                         revised_prompt: Some("final prompt".into()),
                         result: "Zm9v".into(),
                         saved_path: Some(test_path_buf("/tmp/ig_123.png").abs()),

@@ -23,7 +23,7 @@ impl ContextualUserFragment for ImageGenerationInstructions {
 
     fn body(&self) -> String {
         format!(
-            "Generated images are saved to {} as {} by default.\nIf you need to use a generated image at another path, copy it and leave the original in place unless the user explicitly asks you to delete it.",
+            "Generated images are saved to {} as {} by default.\nTo use this generated image in a file or page, reference or copy this exact path instead of regenerating it; leave the original in place unless the user explicitly asks you to delete it.",
             self.image_output_dir, self.image_output_path
         )
     }

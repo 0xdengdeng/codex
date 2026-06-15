@@ -630,6 +630,9 @@ impl McpConnectionManager {
     }
 
     pub async fn resolve_tool_info(&self, tool_name: &ToolName) -> Option<ToolInfo> {
+        if tool_name.namespace.is_none() {
+            return None;
+        }
         let all_tools = self.list_all_tools().await;
         all_tools
             .into_values()

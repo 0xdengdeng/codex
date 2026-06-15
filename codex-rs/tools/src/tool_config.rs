@@ -9,7 +9,6 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
-use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::WebSearchToolType;
@@ -122,7 +121,7 @@ pub struct ToolsConfigParams<'a> {
     pub model_info: &'a ModelInfo,
     pub available_models: &'a [ModelPreset],
     pub features: &'a Features,
-    pub image_generation_tool_auth_allowed: bool,
+    pub image_generation_tool_allowed: bool,
     pub web_search_mode: Option<WebSearchMode>,
     pub session_source: SessionSource,
     pub permission_profile: &'a PermissionProfile,
@@ -156,7 +155,7 @@ impl ToolsConfig {
             model_info,
             available_models,
             features,
-            image_generation_tool_auth_allowed,
+            image_generation_tool_allowed,
             web_search_mode,
             session_source,
             ..
@@ -174,11 +173,8 @@ impl ToolsConfig {
             && features.enabled(Feature::Apps)
             && features.enabled(Feature::Plugins);
         let include_original_image_detail = can_request_original_image_detail(model_info);
-        // API-key auth bypasses Codex backend entitlement/tool normalization, so
-        // callers must confirm ChatGPT auth before exposing the built-in tool.
-        let include_image_gen_tool = *image_generation_tool_auth_allowed
-            && features.enabled(Feature::ImageGeneration)
-            && supports_image_generation(model_info);
+        let include_image_gen_tool =
+            *image_generation_tool_allowed && features.enabled(Feature::ImageGeneration);
         let exec_permission_approvals_enabled = features.enabled(Feature::ExecPermissionApprovals);
         let request_permissions_tool_enabled = features.enabled(Feature::RequestPermissionsTool);
         let shell_command_backend =
@@ -366,10 +362,6 @@ impl ToolsConfig {
         nested.code_mode_only_enabled = false;
         nested
     }
-}
-
-fn supports_image_generation(model_info: &ModelInfo) -> bool {
-    model_info.input_modalities.contains(&InputModality::Image)
 }
 
 #[cfg(test)]

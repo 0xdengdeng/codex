@@ -47,6 +47,7 @@ use codex_api::Reasoning;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
 use codex_api::ResponseCreateWsRequest;
+use codex_api::ResponsesApiInputItem;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient as ApiResponsesClient;
 use codex_api::ResponsesOptions as ApiResponsesOptions;
@@ -443,6 +444,7 @@ impl ModelClient {
             RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
             self.state.auth_env_telemetry.clone(),
         );
+        let compact_input = prompt.get_formatted_input();
         let request = self.build_responses_request(
             &client_setup.api_provider,
             prompt,
@@ -454,7 +456,6 @@ impl ModelClient {
         let ResponsesApiRequest {
             model,
             instructions,
-            input,
             tools,
             parallel_tool_calls,
             reasoning,
@@ -468,7 +469,7 @@ impl ModelClient {
                 .with_telemetry(Some(request_telemetry));
         let payload = ApiCompactionInput {
             model: &model,
-            input: &input,
+            input: &compact_input,
             instructions: &instructions,
             tools,
             parallel_tool_calls,
@@ -662,15 +663,15 @@ impl ModelClient {
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
     ) -> Option<Reasoning> {
-        if model_info.supports_reasoning_summaries {
-            Some(Reasoning {
-                effort: effort.or(model_info.default_reasoning_level),
-                summary: if summary == ReasoningSummaryConfig::None {
-                    None
-                } else {
-                    Some(summary)
-                },
-            })
+        let effort = effort.or(model_info.default_reasoning_level);
+        let summary =
+            if model_info.supports_reasoning_summaries && summary != ReasoningSummaryConfig::None {
+                Some(summary)
+            } else {
+                None
+            };
+        if model_info.supports_reasoning_summaries || effort.is_some() || summary.is_some() {
+            Some(Reasoning { effort, summary })
         } else {
             None
         }
@@ -686,7 +687,11 @@ impl ModelClient {
         service_tier: Option<ServiceTier>,
     ) -> Result<ResponsesApiRequest> {
         let instructions = &prompt.base_instructions.text;
-        let input = prompt.get_formatted_input();
+        let input = prompt
+            .get_formatted_input()
+            .into_iter()
+            .map(ResponsesApiInputItem::from)
+            .collect();
         let tools = create_tools_json_for_responses_api(&prompt.tools)?;
         let reasoning = Self::build_reasoning(model_info, effort, summary);
         let include = if reasoning.is_some() {
@@ -943,7 +948,7 @@ impl ModelClientSession {
         request: &ResponsesApiRequest,
         last_response: Option<&LastResponse>,
         allow_empty_delta: bool,
-    ) -> Option<Vec<ResponseItem>> {
+    ) -> Option<Vec<ResponsesApiInputItem>> {
         // Checks whether the current request is an incremental extension of the previous request.
         // We only reuse an incremental input delta when non-input request fields are unchanged and
         // `input` is a strict
@@ -963,7 +968,13 @@ impl ModelClientSession {
 
         let mut baseline = previous_request.input.clone();
         if let Some(last_response) = last_response {
-            baseline.extend(last_response.items_added.clone());
+            baseline.extend(
+                last_response
+                    .items_added
+                    .clone()
+                    .into_iter()
+                    .map(ResponsesApiInputItem::from),
+            );
         }
 
         let baseline_len = baseline.len();

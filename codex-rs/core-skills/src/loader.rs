@@ -108,6 +108,7 @@ const AGENTS_DIR_NAME: &str = ".agents";
 const SKILLS_METADATA_DIR: &str = "agents";
 const SKILLS_METADATA_FILENAME: &str = "openai.yaml";
 const SKILLS_DIR_NAME: &str = "skills";
+const DISABLE_HOME_AGENTS_SKILLS_ENV: &str = "CODEX_DISABLE_HOME_AGENTS_SKILLS";
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 const MAX_SHORT_DESCRIPTION_LEN: usize = MAX_DESCRIPTION_LEN;
@@ -235,12 +236,14 @@ pub(crate) async fn skill_roots(
 ) -> Vec<SkillRoot> {
     let home_dir =
         home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok());
+    let include_home_agents_skills = include_home_agents_skills_from_env();
     skill_roots_with_home_dir(
         fs,
         config_layer_stack,
         cwd,
         home_dir.as_ref(),
         plugin_skill_roots,
+        include_home_agents_skills,
     )
     .await
 }
@@ -251,8 +254,14 @@ async fn skill_roots_with_home_dir(
     cwd: &AbsolutePathBuf,
     home_dir: Option<&AbsolutePathBuf>,
     plugin_skill_roots: Vec<PluginSkillRoot>,
+    include_home_agents_skills: bool,
 ) -> Vec<SkillRoot> {
-    let mut roots = skill_roots_from_layer_stack_inner(config_layer_stack, home_dir, fs.clone());
+    let mut roots = skill_roots_from_layer_stack_inner(
+        config_layer_stack,
+        home_dir,
+        fs.clone(),
+        include_home_agents_skills,
+    );
     roots.extend(plugin_skill_roots.into_iter().map(|root| SkillRoot {
         path: root.path,
         scope: SkillScope::User,
@@ -268,6 +277,7 @@ fn skill_roots_from_layer_stack_inner(
     config_layer_stack: &ConfigLayerStack,
     home_dir: Option<&AbsolutePathBuf>,
     repo_fs: Option<Arc<dyn ExecutorFileSystem>>,
+    include_home_agents_skills: bool,
 ) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
 
@@ -301,7 +311,7 @@ fn skill_roots_from_layer_stack_inner(
                 });
 
                 // `$HOME/.agents/skills` (user-installed skills).
-                if let Some(home_dir) = home_dir {
+                if include_home_agents_skills && let Some(home_dir) = home_dir {
                     roots.push(SkillRoot {
                         path: home_dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
                         scope: SkillScope::User,
@@ -337,6 +347,16 @@ fn skill_roots_from_layer_stack_inner(
     }
 
     roots
+}
+
+fn include_home_agents_skills_from_env() -> bool {
+    let Ok(value) = std::env::var(DISABLE_HOME_AGENTS_SKILLS_ENV) else {
+        return true;
+    };
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 async fn repo_agents_skill_roots(
@@ -983,7 +1003,15 @@ pub(crate) async fn skill_roots_from_layer_stack(
     cwd: &AbsolutePathBuf,
     home_dir: Option<&AbsolutePathBuf>,
 ) -> Vec<SkillRoot> {
-    skill_roots_with_home_dir(Some(fs), config_layer_stack, cwd, home_dir, Vec::new()).await
+    skill_roots_with_home_dir(
+        Some(fs),
+        config_layer_stack,
+        cwd,
+        home_dir,
+        Vec::new(),
+        /*include_home_agents_skills*/ true,
+    )
+    .await
 }
 
 #[cfg(test)]

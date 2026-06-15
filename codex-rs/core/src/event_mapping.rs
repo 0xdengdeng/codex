@@ -108,7 +108,7 @@ fn parse_agent_message(
     id: Option<&String>,
     message: &[ContentItem],
     phase: Option<MessagePhase>,
-) -> AgentMessageItem {
+) -> Option<AgentMessageItem> {
     let mut content: Vec<AgentMessageContent> = Vec::new();
     for content_item in message.iter() {
         match content_item {
@@ -123,13 +123,18 @@ fn parse_agent_message(
             }
         }
     }
+    if !content.iter().any(|content| match content {
+        AgentMessageContent::Text { text } => !text.trim().is_empty(),
+    }) {
+        return None;
+    }
     let id = id.cloned().unwrap_or_else(|| Uuid::new_v4().to_string());
-    AgentMessageItem {
+    Some(AgentMessageItem {
         id,
         content,
         phase,
         memory_citation: None,
-    }
+    })
 }
 
 pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
@@ -144,11 +149,9 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
             "user" => parse_visible_hook_prompt_message(id.as_ref(), content)
                 .map(TurnItem::HookPrompt)
                 .or_else(|| parse_user_message(content).map(TurnItem::UserMessage)),
-            "assistant" => Some(TurnItem::AgentMessage(parse_agent_message(
-                id.as_ref(),
-                content,
-                phase.clone(),
-            ))),
+            "assistant" => {
+                parse_agent_message(id.as_ref(), content, phase.clone()).map(TurnItem::AgentMessage)
+            }
             "system" => None,
             _ => None,
         },
@@ -193,12 +196,16 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
         ResponseItem::ImageGenerationCall {
             id,
             status,
+            model,
+            size,
             revised_prompt,
             result,
         } => Some(TurnItem::ImageGeneration(
             codex_protocol::items::ImageGenerationItem {
                 id: id.clone(),
                 status: status.clone(),
+                model: model.clone(),
+                size: size.clone(),
                 revised_prompt: revised_prompt.clone(),
                 result: result.clone(),
                 saved_path: None,

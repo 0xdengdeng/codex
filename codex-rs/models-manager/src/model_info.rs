@@ -14,6 +14,7 @@ use codex_utils_output_truncation::approx_bytes_for_tokens;
 use tracing::warn;
 
 pub const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
+pub const GPT_CODEX_IDENTITY_PREFIX: &str = "You are Codex, a coding agent based on GPT-5.";
 const DEFAULT_PERSONALITY_HEADER: &str = "You are Codex, a coding agent based on GPT-5. You and the user share the same workspace and collaborate to achieve the user's goals.";
 const LOCAL_FRIENDLY_TEMPLATE: &str =
     "You optimize for team morale and being a supportive teammate as much as code quality.";
@@ -53,13 +54,43 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
     }
 
     if let Some(base_instructions) = &config.base_instructions {
-        model.base_instructions = base_instructions.clone();
+        model.base_instructions = normalize_base_instructions_for_model(
+            &model.slug,
+            &model.display_name,
+            base_instructions,
+        );
         model.model_messages = None;
     } else if !config.personality_enabled {
         model.model_messages = None;
     }
 
     model
+}
+
+pub fn normalize_base_instructions_for_model(
+    slug: &str,
+    display_name: &str,
+    base_instructions: &str,
+) -> String {
+    if is_third_party_model_slug(slug)
+        && base_instructions
+            .trim_start()
+            .starts_with(GPT_CODEX_IDENTITY_PREFIX)
+    {
+        let selected_model = if display_name.trim().is_empty() {
+            slug
+        } else {
+            display_name.trim()
+        };
+        return format!(
+            "You are {selected_model}, a coding agent running in an AI workspace platform. You and the user share the same workspace and collaborate to achieve the user's goals."
+        );
+    }
+    base_instructions.to_string()
+}
+
+pub fn is_third_party_model_slug(slug: &str) -> bool {
+    !slug.contains("gpt-")
 }
 
 /// Build a minimal fallback model descriptor for missing/unknown slugs.

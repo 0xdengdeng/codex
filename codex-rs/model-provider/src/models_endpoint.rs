@@ -71,6 +71,20 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
         self.provider_info.has_command_auth()
     }
 
+    fn has_provider_auth(&self) -> bool {
+        let has_bearer_token = self
+            .provider_info
+            .experimental_bearer_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty());
+        let has_env_key = self
+            .provider_info
+            .env_key
+            .as_deref()
+            .is_some_and(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()));
+        has_bearer_token || has_env_key
+    }
+
     async fn uses_codex_backend(&self) -> bool {
         self.auth()
             .await

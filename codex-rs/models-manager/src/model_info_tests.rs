@@ -45,6 +45,44 @@ fn reasoning_summaries_override_false_is_noop_when_model_is_false() {
 }
 
 #[test]
+fn base_instructions_override_rewrites_gpt_identity_for_third_party_model() {
+    let model = model_info_from_slug("doubao-seed-2-0-code-preview-260215");
+    let config = ModelsManagerConfig {
+        base_instructions: Some(
+            "You are Codex, a coding agent based on GPT-5.\n\n# General\nUse tools carefully."
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+
+    let updated = with_config_overrides(model, &config);
+
+    assert!(
+        updated
+            .base_instructions
+            .starts_with("You are doubao-seed-2-0-code-preview-260215,")
+    );
+    assert!(!updated.base_instructions.contains("GPT-5"));
+    assert!(!updated.base_instructions.contains("Codex"));
+    assert!(updated.base_instructions.contains("coding agent"));
+    assert_eq!(updated.model_messages, None);
+}
+
+#[test]
+fn base_instructions_override_keeps_custom_third_party_identity() {
+    let model = model_info_from_slug("doubao-seed-2-0-code-preview-260215");
+    let custom_instructions = "You are a concise backend engineering assistant.";
+    let config = ModelsManagerConfig {
+        base_instructions: Some(custom_instructions.to_string()),
+        ..Default::default()
+    };
+
+    let updated = with_config_overrides(model, &config);
+
+    assert_eq!(updated.base_instructions, custom_instructions);
+}
+
+#[test]
 fn model_context_window_override_clamps_to_max_context_window() {
     let mut model = model_info_from_slug("unknown-model");
     model.context_window = Some(273_000);

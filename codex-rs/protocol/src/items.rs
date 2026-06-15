@@ -142,6 +142,12 @@ pub struct ImageGenerationItem {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub revised_prompt: Option<String>,
     pub result: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -453,6 +459,8 @@ impl ImageGenerationItem {
         EventMsg::ImageGenerationEnd(ImageGenerationEndEvent {
             call_id: self.id.clone(),
             status: self.status.clone(),
+            model: self.model.clone(),
+            size: self.size.clone(),
             revised_prompt: self.revised_prompt.clone(),
             result: self.result.clone(),
             saved_path: self.saved_path.clone(),

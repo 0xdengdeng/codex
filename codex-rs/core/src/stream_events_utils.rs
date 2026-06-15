@@ -33,33 +33,112 @@ use tracing::debug;
 use tracing::instrument;
 
 const GENERATED_IMAGE_ARTIFACTS_DIR: &str = "generated_images";
+const MAX_REHYDRATED_IMAGE_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
+
+pub(crate) fn image_generation_artifact_call_id(turn_id: &str, call_id: &str) -> String {
+    let turn_id = turn_id.trim();
+    if turn_id.is_empty() {
+        call_id.to_string()
+    } else {
+        format!("{turn_id}_{call_id}")
+    }
+}
+
+fn sanitize_image_generation_path_component(value: &str) -> String {
+    let mut sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        sanitized = "generated_image".to_string();
+    }
+    sanitized
+}
 
 pub(crate) fn image_generation_artifact_path(
     codex_home: &AbsolutePathBuf,
     session_id: &str,
     call_id: &str,
 ) -> AbsolutePathBuf {
-    let sanitize = |value: &str| {
-        let mut sanitized: String = value
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        if sanitized.is_empty() {
-            sanitized = "generated_image".to_string();
-        }
-        sanitized
-    };
-
     codex_home
         .join(GENERATED_IMAGE_ARTIFACTS_DIR)
-        .join(sanitize(session_id))
-        .join(format!("{}.png", sanitize(call_id)))
+        .join(sanitize_image_generation_path_component(session_id))
+        .join(format!(
+            "{}.png",
+            sanitize_image_generation_path_component(call_id)
+        ))
+}
+
+async fn read_image_generation_artifact(
+    codex_home: &AbsolutePathBuf,
+    session_id: &str,
+    call_id: &str,
+) -> Option<Vec<u8>> {
+    let exact_path = image_generation_artifact_path(codex_home, session_id, call_id);
+    if let Some(bytes) = read_bounded_artifact(&exact_path).await {
+        return Some(bytes);
+    }
+
+    let dir = codex_home
+        .join(GENERATED_IMAGE_ARTIFACTS_DIR)
+        .join(sanitize_image_generation_path_component(session_id));
+    let suffix = format!("_{}.png", sanitize_image_generation_path_component(call_id));
+    let mut entries = tokio::fs::read_dir(&dir).await.ok()?;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.ends_with(&suffix) {
+            continue;
+        }
+        if let Some(bytes) = read_bounded_artifact(&entry.path()).await {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+async fn read_bounded_artifact(path: &std::path::Path) -> Option<Vec<u8>> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_REHYDRATED_IMAGE_ARTIFACT_BYTES {
+        return None;
+    }
+    tokio::fs::read(path).await.ok()
+}
+
+pub(crate) async fn rehydrate_image_generation_results_from_artifacts(
+    codex_home: &AbsolutePathBuf,
+    session_id: &str,
+    items: &mut [ResponseItem],
+) {
+    for item in items {
+        let ResponseItem::ImageGenerationCall { id, result, .. } = item else {
+            continue;
+        };
+        if !result.trim().is_empty() {
+            continue;
+        }
+        let Some(bytes) = read_image_generation_artifact(codex_home, session_id, id).await else {
+            continue;
+        };
+        *result = BASE64_STANDARD.encode(bytes);
+    }
+}
+
+pub(crate) fn retain_image_generation_calls_with_results(items: &mut Vec<ResponseItem>) {
+    items.retain(|item| {
+        !matches!(
+            item,
+            ResponseItem::ImageGenerationCall { result, .. } if result.trim().is_empty()
+        )
+    });
 }
 
 fn strip_hidden_assistant_markup(text: &str, plan_mode: bool) -> String {
@@ -120,6 +199,24 @@ async fn save_image_generation_result(
     }
     tokio::fs::write(&path, bytes).await?;
     Ok(path)
+}
+
+fn normalize_optional_image_generation_metadata(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn enrich_image_generation_item(
+    item: &mut codex_protocol::items::ImageGenerationItem,
+    turn_context: &TurnContext,
+) {
+    item.model =
+        normalize_optional_image_generation_metadata(item.model.as_deref()).or_else(|| {
+            normalize_optional_image_generation_metadata(Some(
+                turn_context.model_info.slug.as_str(),
+            ))
+        });
+    item.size = normalize_optional_image_generation_metadata(item.size.as_deref());
 }
 
 /// Persist a completed model response item and record any cited memory usage.
@@ -374,38 +471,42 @@ pub(crate) async fn handle_non_tool_response_item(
                 agent_message.memory_citation = memory_citation;
             }
             if let TurnItem::ImageGeneration(image_item) = &mut turn_item {
+                enrich_image_generation_item(image_item, turn_context);
+                if image_item.result.trim().is_empty() {
+                    return Some(turn_item);
+                }
                 let session_id = sess.conversation_id.to_string();
+                let artifact_call_id =
+                    image_generation_artifact_call_id(&turn_context.sub_id, &image_item.id);
                 match save_image_generation_result(
                     &turn_context.config.codex_home,
                     &session_id,
-                    &image_item.id,
+                    &artifact_call_id,
                     &image_item.result,
                 )
                 .await
                 {
                     Ok(path) => {
-                        image_item.saved_path = Some(path);
-                        let image_output_path = image_generation_artifact_path(
-                            &turn_context.config.codex_home,
-                            &session_id,
-                            "<image_id>",
-                        );
-                        let image_output_dir = image_output_path
+                        // Inject the concrete saved path of THIS image (not a
+                        // generic pattern) so a later turn can reference/copy the
+                        // exact file instead of regenerating it.
+                        let image_output_dir = path
                             .parent()
                             .unwrap_or_else(|| turn_context.config.codex_home.clone());
                         let message: ResponseItem =
                             ContextualUserFragment::into(ImageGenerationInstructions::new(
                                 image_output_dir.display(),
-                                image_output_path.display(),
+                                path.display(),
                             ));
                         sess.record_conversation_items(turn_context, &[message])
                             .await;
+                        image_item.saved_path = Some(path);
                     }
                     Err(err) => {
                         let output_path = image_generation_artifact_path(
                             &turn_context.config.codex_home,
                             &session_id,
-                            &image_item.id,
+                            &artifact_call_id,
                         );
                         let output_dir = output_path
                             .parent()

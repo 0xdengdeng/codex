@@ -1,4 +1,4 @@
-use codex_protocol::models::ResponseItem;
+use crate::common::ResponsesApiInputItem;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -8,7 +8,7 @@ pub enum Compression {
     Zstd,
 }
 
-pub(crate) fn attach_item_ids(payload_json: &mut Value, original_items: &[ResponseItem]) {
+pub(crate) fn attach_item_ids(payload_json: &mut Value, original_items: &[ResponsesApiInputItem]) {
     let Some(input_value) = payload_json.get_mut("input") else {
         return;
     };
@@ -17,21 +17,15 @@ pub(crate) fn attach_item_ids(payload_json: &mut Value, original_items: &[Respon
     };
 
     for (value, item) in items.iter_mut().zip(original_items.iter()) {
-        if let ResponseItem::Reasoning { id, .. }
-        | ResponseItem::Message { id: Some(id), .. }
-        | ResponseItem::WebSearchCall { id: Some(id), .. }
-        | ResponseItem::FunctionCall { id: Some(id), .. }
-        | ResponseItem::ToolSearchCall { id: Some(id), .. }
-        | ResponseItem::LocalShellCall { id: Some(id), .. }
-        | ResponseItem::CustomToolCall { id: Some(id), .. } = item
-        {
-            if id.is_empty() {
-                continue;
-            }
+        let Some(id) = item.internal_id() else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
 
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("id".to_string(), Value::String(id.clone()));
-            }
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(id.to_string()));
         }
     }
 }

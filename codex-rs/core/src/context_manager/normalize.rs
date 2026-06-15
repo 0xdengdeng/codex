@@ -294,6 +294,7 @@ where
 /// When `input_modalities` contains `InputModality::Image`, no stripping is performed.
 pub(crate) fn strip_images_when_unsupported(
     input_modalities: &[InputModality],
+    preserve_image_generation_results: bool,
     items: &mut [ResponseItem],
 ) {
     let supports_images = input_modalities.contains(&InputModality::Image);
@@ -336,7 +337,9 @@ pub(crate) fn strip_images_when_unsupported(
                     *content_items = normalized_content_items;
                 }
             }
-            ResponseItem::ImageGenerationCall { result, .. } => {
+            ResponseItem::ImageGenerationCall { result, .. }
+                if !preserve_image_generation_results =>
+            {
                 result.clear();
             }
             _ => {}

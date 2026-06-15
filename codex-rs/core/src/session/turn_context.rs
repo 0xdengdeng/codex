@@ -15,8 +15,12 @@ use codex_tools::ToolEnvironmentMode;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-pub(super) fn image_generation_tool_auth_allowed(auth_manager: Option<&AuthManager>) -> bool {
-    auth_manager.is_some_and(AuthManager::current_auth_uses_codex_backend)
+pub(super) fn image_generation_tool_allowed(
+    auth_manager: Option<&AuthManager>,
+    provider_image_generation: bool,
+) -> bool {
+    provider_image_generation
+        || auth_manager.is_some_and(AuthManager::current_auth_uses_codex_backend)
 }
 
 #[derive(Clone, Debug)]
@@ -124,12 +128,10 @@ impl TurnContext {
     }
 
     pub(crate) fn effective_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
-        if self.model_info.supports_reasoning_summaries {
-            self.reasoning_effort
-                .or(self.model_info.default_reasoning_level)
-        } else {
-            None
-        }
+        effective_reasoning_effort(
+            self.reasoning_effort,
+            self.model_info.default_reasoning_level,
+        )
     }
 
     pub(crate) fn effective_reasoning_effort_for_tracing(&self) -> String {
@@ -201,8 +203,9 @@ impl TurnContext {
                 .list_models(RefreshStrategy::OnlineIfUncached)
                 .await,
             features: &features,
-            image_generation_tool_auth_allowed: image_generation_tool_auth_allowed(
+            image_generation_tool_allowed: image_generation_tool_allowed(
                 self.auth_manager.as_deref(),
+                provider_capabilities.image_generation,
             ),
             web_search_mode: self.tools_config.web_search_mode,
             session_source: self.session_source.clone(),
@@ -392,6 +395,37 @@ impl TurnContext {
     }
 }
 
+fn effective_reasoning_effort(
+    reasoning_effort: Option<ReasoningEffortConfig>,
+    default_reasoning_level: Option<ReasoningEffortConfig>,
+) -> Option<ReasoningEffortConfig> {
+    reasoning_effort.or(default_reasoning_level)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_reasoning_effort_prefers_requested_effort() {
+        assert_eq!(
+            effective_reasoning_effort(
+                Some(ReasoningEffortConfig::High),
+                Some(ReasoningEffortConfig::Medium),
+            ),
+            Some(ReasoningEffortConfig::High)
+        );
+    }
+
+    #[test]
+    fn effective_reasoning_effort_uses_model_default_when_request_is_absent() {
+        assert_eq!(
+            effective_reasoning_effort(None, Some(ReasoningEffortConfig::Medium)),
+            Some(ReasoningEffortConfig::Medium)
+        );
+    }
+}
+
 fn local_time_context() -> (String, String) {
     match iana_time_zone::get_timezone() {
         Ok(timezone) => (Local::now().format("%Y-%m-%d").to_string(), timezone),
@@ -469,17 +503,19 @@ impl Session {
             model_info.slug.as_str(),
         );
         let session_source = session_configuration.session_source.clone();
-        let image_generation_tool_auth_allowed =
-            image_generation_tool_auth_allowed(auth_manager.as_deref());
         let auth_manager_for_context = auth_manager.clone();
         let provider_for_context = create_model_provider(provider, auth_manager);
         let provider_capabilities = provider_for_context.capabilities();
+        let image_generation_tool_allowed = image_generation_tool_allowed(
+            auth_manager_for_context.as_deref(),
+            provider_capabilities.image_generation,
+        );
         let session_telemetry_for_context = session_telemetry;
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_info: &model_info,
             available_models: &models_manager.try_list_models().unwrap_or_default(),
             features: &per_turn_config.features,
-            image_generation_tool_auth_allowed,
+            image_generation_tool_allowed,
             web_search_mode: Some(per_turn_config.web_search_mode.value()),
             session_source: session_source.clone(),
             permission_profile: &session_configuration.permission_profile(),

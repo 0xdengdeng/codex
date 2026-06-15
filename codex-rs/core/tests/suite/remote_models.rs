@@ -440,6 +440,90 @@ async fn remote_models_long_model_slug_is_sent_with_high_reasoning() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_models_send_reasoning_effort_without_reasoning_summaries() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = MockServer::start().await;
+    let requested_model = "doubao-seed-2-0-code-preview-260215";
+    let mut remote_model = test_remote_model(
+        requested_model,
+        ModelVisibility::List,
+        /*priority*/ 1_000,
+    );
+    remote_model.default_reasoning_level = Some(ReasoningEffort::Medium);
+    remote_model.supported_reasoning_levels = vec![
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Medium,
+            description: ReasoningEffort::Medium.to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::High,
+            description: ReasoningEffort::High.to_string(),
+        },
+    ];
+    remote_model.supports_reasoning_summaries = false;
+    remote_model.default_reasoning_summary = ReasoningSummary::Auto;
+    mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![remote_model],
+        },
+    )
+    .await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+
+    let TestCodex {
+        codex, cwd, config, ..
+    } = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.model = Some(requested_model.to_string());
+        })
+        .build(&server)
+        .await?;
+
+    codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "check reasoning effort".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: config.permissions.approval_policy.value(),
+            approvals_reviewer: None,
+            sandbox_policy: config.legacy_sandbox_policy(),
+            permission_profile: None,
+            model: requested_model.to_string(),
+            effort: Some(ReasoningEffort::High),
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+            environments: None,
+        })
+        .await?;
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let request = response_mock.single_request();
+    let body = request.body_json();
+    assert_eq!(
+        body.pointer("/reasoning/effort")
+            .and_then(|value| value.as_str()),
+        Some("high")
+    );
+    assert_eq!(body.pointer("/reasoning/summary"), None);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn namespaced_model_slug_uses_catalog_metadata_without_fallback_warning() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));

@@ -327,6 +327,22 @@ fn parses_agent_message() {
 }
 
 #[test]
+fn skips_empty_agent_message() {
+    let item = ResponseItem::Message {
+        id: Some("msg-empty".to_string()),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: String::new(),
+        }],
+        phase: None,
+    };
+
+    let turn_item = parse_turn_item(&item);
+
+    assert!(turn_item.is_none(), "expected none, got {turn_item:?}");
+}
+
+#[test]
 fn parses_reasoning_summary_and_raw_content() {
     let item = ResponseItem::Reasoning {
         id: "reasoning_1".to_string(),

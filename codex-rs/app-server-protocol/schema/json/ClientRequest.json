@@ -2891,10 +2891,22 @@
             "id": {
               "type": "string"
             },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "result": {
               "type": "string"
             },
             "revised_prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "size": {
               "type": [
                 "string",
                 "null"
@@ -2913,7 +2925,6 @@
           },
           "required": [
             "id",
-            "result",
             "status",
             "type"
           ],

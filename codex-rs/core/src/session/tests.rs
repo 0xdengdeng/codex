@@ -1179,6 +1179,50 @@ async fn get_base_instructions_no_user_content() {
 }
 
 #[tokio::test]
+async fn resolve_base_instructions_rewrites_gpt_identity_for_third_party_config_override() {
+    let mut config = test_config().await;
+    config.base_instructions = Some("You are Codex, a coding agent based on GPT-5.".to_string());
+    let model_info = model_info::model_info_from_slug("doubao-seed-2-0-code-preview-260215");
+
+    let base_instructions = resolve_base_instructions(&config, &InitialHistory::New, &model_info);
+
+    assert!(base_instructions.starts_with("You are doubao-seed-2-0-code-preview-260215,"));
+    assert!(!base_instructions.contains("GPT-5"));
+    assert!(!base_instructions.contains("Codex"));
+    assert!(base_instructions.contains("coding agent"));
+}
+
+#[tokio::test]
+async fn resolve_base_instructions_rewrites_gpt_identity_for_third_party_model_metadata() {
+    let config = test_config().await;
+    let mut model_info = model_info::model_info_from_slug("doubao-seed-2-0-code-preview-260215");
+    model_info.base_instructions = "You are Codex, a coding agent based on GPT-5.".to_string();
+    model_info.model_messages = None;
+
+    let base_instructions = resolve_base_instructions(&config, &InitialHistory::New, &model_info);
+
+    assert!(base_instructions.starts_with("You are doubao-seed-2-0-code-preview-260215,"));
+    assert!(!base_instructions.contains("GPT-5"));
+    assert!(!base_instructions.contains("Codex"));
+    assert!(base_instructions.contains("coding agent"));
+}
+
+#[tokio::test]
+async fn resolve_base_instructions_keeps_gpt_identity_for_openai_model() {
+    let config = test_config().await;
+    let mut model_info = model_info::model_info_from_slug("gpt-5.4");
+    model_info.base_instructions = "You are Codex, a coding agent based on GPT-5.".to_string();
+    model_info.model_messages = None;
+
+    let base_instructions = resolve_base_instructions(&config, &InitialHistory::New, &model_info);
+
+    assert_eq!(
+        base_instructions,
+        "You are Codex, a coding agent based on GPT-5."
+    );
+}
+
+#[tokio::test]
 async fn reload_user_config_layer_updates_effective_apps_config() {
     let (session, _turn_context) = make_session_and_context().await;
     let codex_home = session.codex_home().await;
@@ -3409,6 +3453,39 @@ async fn session_update_settings_does_not_rewrite_sticky_environment_cwds() {
 }
 
 #[tokio::test]
+async fn session_update_settings_rewrites_gpt_identity_when_switching_to_third_party_model() {
+    let (session, _turn_context) = make_session_and_context().await;
+    {
+        let mut state = session.state.lock().await;
+        state.session_configuration.base_instructions =
+            model_info::GPT_CODEX_IDENTITY_PREFIX.to_string();
+    }
+
+    session
+        .update_settings(SessionSettingsUpdate {
+            collaboration_mode: Some(CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: "doubao-seed-2-0-code-preview-260215".to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("model update should succeed");
+
+    let base_instructions = session.get_base_instructions().await;
+    assert_eq!(
+        base_instructions.text,
+        "You are doubao-seed-2-0-code-preview-260215, a coding agent running in an AI workspace platform. You and the user share the same workspace and collaborate to achieve the user's goals."
+    );
+    assert!(!base_instructions.text.contains("GPT-5"));
+    assert!(!base_instructions.text.contains("Codex"));
+}
+
+#[tokio::test]
 async fn relative_cwd_update_without_environments_resolves_under_session_cwd() {
     let (session, _turn_context) = make_session_and_context().await;
     let original_cwd = {
@@ -5523,6 +5600,24 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
     .await
 }
 
+#[tokio::test]
+async fn api_key_provider_exposes_native_image_generation_when_provider_supports_it() {
+    let (_session, turn_context, _rx_event) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            config
+                .features
+                .enable(Feature::ImageGeneration)
+                .expect("image generation should be enableable in tests");
+        },
+    )
+    .await;
+
+    assert!(turn_context.provider.capabilities().image_generation);
+    assert!(turn_context.tools_config.image_gen_tool);
+}
+
 async fn make_goal_session_and_context_with_rx() -> (
     Arc<Session>,
     Arc<TurnContext>,
@@ -6044,6 +6139,8 @@ async fn build_initial_context_omits_default_image_save_location_with_image_hist
             vec![ResponseItem::ImageGenerationCall {
                 id: "ig-test".to_string(),
                 status: "completed".to_string(),
+                model: None,
+                size: None,
                 revised_prompt: Some("a tiny blue square".to_string()),
                 result: "Zm9v".to_string(),
             }],
@@ -6287,15 +6384,21 @@ async fn handle_output_item_done_records_image_save_history_message() {
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context);
     let call_id = "ig_history_records_message";
+    let expected_artifact_call_id = crate::stream_events_utils::image_generation_artifact_call_id(
+        &turn_context.sub_id,
+        call_id,
+    );
     let expected_saved_path = crate::stream_events_utils::image_generation_artifact_path(
         &turn_context.config.codex_home,
         &session.conversation_id.to_string(),
-        call_id,
+        &expected_artifact_call_id,
     );
     let _ = std::fs::remove_file(&expected_saved_path);
     let item = ResponseItem::ImageGenerationCall {
         id: call_id.to_string(),
         status: "completed".to_string(),
+        model: None,
+        size: None,
         revised_prompt: Some("a tiny blue square".to_string()),
         result: "Zm9v".to_string(),
     };
@@ -6311,11 +6414,7 @@ async fn handle_output_item_done_records_image_save_history_message() {
         .expect("image generation item should succeed");
 
     let history = session.clone_history().await;
-    let image_output_path = crate::stream_events_utils::image_generation_artifact_path(
-        &turn_context.config.codex_home,
-        &session.conversation_id.to_string(),
-        "<image_id>",
-    );
+    let image_output_path = expected_saved_path.clone();
     let image_output_dir = image_output_path
         .parent()
         .expect("generated image path should have a parent");
@@ -6326,6 +6425,32 @@ async fn handle_output_item_done_records_image_save_history_message() {
         ),
     );
     assert_eq!(history.raw_items(), &[image_message, item]);
+    // The injected developer message must carry the concrete saved path of this
+    // image (not a generic pattern) and steer the model toward reusing it.
+    let injected_text = match history.raw_items().first() {
+        Some(ResponseItem::Message { content, .. }) => content
+            .iter()
+            .filter_map(|part| match part {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>(),
+        other => panic!("expected injected developer message, got {other:?}"),
+    };
+    assert!(
+        injected_text.contains(&expected_saved_path.display().to_string()),
+        "injected message should contain the concrete saved path, got {injected_text:?}"
+    );
+    assert!(
+        !injected_text.contains("turn_id_image_id"),
+        "injected message must not use the placeholder pattern, got {injected_text:?}"
+    );
+    assert!(
+        injected_text.contains("reference or copy this exact path"),
+        "injected message should steer reuse over regeneration, got {injected_text:?}"
+    );
     assert_eq!(
         std::fs::read(&expected_saved_path).expect("saved file"),
         b"foo"
@@ -6339,15 +6464,21 @@ async fn handle_output_item_done_skips_image_save_message_when_save_fails() {
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context);
     let call_id = "ig_history_no_message";
+    let expected_artifact_call_id = crate::stream_events_utils::image_generation_artifact_call_id(
+        &turn_context.sub_id,
+        call_id,
+    );
     let expected_saved_path = crate::stream_events_utils::image_generation_artifact_path(
         &turn_context.config.codex_home,
         &session.conversation_id.to_string(),
-        call_id,
+        &expected_artifact_call_id,
     );
     let _ = std::fs::remove_file(&expected_saved_path);
     let item = ResponseItem::ImageGenerationCall {
         id: call_id.to_string(),
         status: "completed".to_string(),
+        model: None,
+        size: None,
         revised_prompt: Some("broken payload".to_string()),
         result: "_-8".to_string(),
     };

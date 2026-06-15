@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio::time::timeout;
 use tokio_util::io::ReaderStream;
+use tracing::Level;
 use tracing::debug;
 use tracing::trace;
 
@@ -30,6 +31,8 @@ const X_REASONING_INCLUDED_HEADER: &str = "x-reasoning-included";
 const OPENAI_MODEL_HEADER: &str = "openai-model";
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const TRUSTED_ACCESS_FOR_CYBER_VERIFICATION: &str = "trusted_access_for_cyber";
+const SSE_LOG_MAX_BYTES: usize = 8 * 1024;
+const LARGE_IMAGE_LOG_FIELD_MIN_BYTES: usize = 512;
 
 /// Streams SSE events from an on-disk fixture for tests.
 pub fn stream_from_fixture(
@@ -300,7 +303,7 @@ pub fn process_responses_event(
     match event.kind.as_str() {
         "response.output_item.done" => {
             if let Some(item_val) = event.item {
-                if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
+                if let Ok(item) = parse_response_item(item_val) {
                     return Ok(Some(ResponseEvent::OutputItemDone(item)));
                 }
                 debug!("failed to parse ResponseItem from output_item.done");
@@ -409,7 +412,7 @@ pub fn process_responses_event(
         }
         "response.output_item.added" => {
             if let Some(item_val) = event.item {
-                if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
+                if let Ok(item) = parse_response_item(item_val) {
                     return Ok(Some(ResponseEvent::OutputItemAdded(item)));
                 }
                 debug!("failed to parse ResponseItem from output_item.added");
@@ -428,6 +431,23 @@ pub fn process_responses_event(
     }
 
     Ok(None)
+}
+
+fn parse_response_item(mut item_val: Value) -> Result<ResponseItem, serde_json::Error> {
+    if let Some(item) = item_val.as_object_mut()
+        && item.get("type").and_then(Value::as_str) == Some("reasoning")
+        && !item.contains_key("summary")
+    {
+        item.insert("summary".to_string(), Value::Array(Vec::new()));
+    }
+    if let Some(item) = item_val.as_object_mut()
+        && item.get("type").and_then(Value::as_str) == Some("message")
+        && !item.contains_key("content")
+    {
+        item.insert("content".to_string(), Value::Array(Vec::new()));
+    }
+
+    serde_json::from_value::<ResponseItem>(item_val)
 }
 
 pub async fn process_sse(
@@ -468,12 +488,17 @@ pub async fn process_sse(
             }
         };
 
-        trace!("SSE event: {}", &sse.data);
+        if tracing::enabled!(Level::TRACE) {
+            trace!("SSE event: {}", sanitize_sse_event_for_log(&sse.data));
+        }
 
         let event: ResponsesStreamEvent = match serde_json::from_str(&sse.data) {
             Ok(event) => event,
             Err(e) => {
-                debug!("Failed to parse SSE event: {e}, data: {}", &sse.data);
+                debug!(
+                    "Failed to parse SSE event: {e}, data: {}",
+                    sanitize_sse_event_for_log(&sse.data)
+                );
                 continue;
             }
         };
@@ -516,6 +541,63 @@ pub async fn process_sse(
             }
         };
     }
+}
+
+fn sanitize_sse_event_for_log(data: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(data) else {
+        return truncate_sse_event_for_log(data);
+    };
+
+    redact_large_image_log_payloads(&mut value);
+    truncate_sse_event_for_log(&value.to_string())
+}
+
+fn redact_large_image_log_payloads(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if should_redact_log_field(key, child) {
+                    if let Value::String(text) = child {
+                        *child = Value::String(format!("<redacted string len={}>", text.len()));
+                    }
+                    continue;
+                }
+
+                redact_large_image_log_payloads(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_large_image_log_payloads(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn should_redact_log_field(key: &str, value: &Value) -> bool {
+    let Some(text) = value.as_str() else {
+        return false;
+    };
+
+    key == "partial_image_b64" || (key == "result" && text.len() >= LARGE_IMAGE_LOG_FIELD_MIN_BYTES)
+}
+
+fn truncate_sse_event_for_log(data: &str) -> String {
+    if data.len() <= SSE_LOG_MAX_BYTES {
+        return data.to_string();
+    }
+
+    let mut end = SSE_LOG_MAX_BYTES;
+    while !data.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}...<truncated bytes={} total_bytes={}>",
+        &data[..end],
+        data.len() - end,
+        data.len()
+    )
 }
 
 fn try_parse_retry_after(err: &Error) -> Option<Duration> {
@@ -663,6 +745,31 @@ mod tests {
         Duration::from_millis(1000)
     }
 
+    #[test]
+    fn sanitize_sse_event_for_log_redacts_large_image_payloads() {
+        let result_b64 = "A".repeat(2048);
+        let partial_b64 = "B".repeat(2048);
+        let data = json!({
+            "type": "response.output_item.done",
+            "partial_image_b64": partial_b64,
+            "item": {
+                "type": "image_generation_call",
+                "result": result_b64,
+                "status": "completed"
+            }
+        })
+        .to_string();
+
+        let sanitized = sanitize_sse_event_for_log(&data);
+
+        assert!(!sanitized.contains(&"A".repeat(1024)));
+        assert!(!sanitized.contains(&"B".repeat(1024)));
+        assert!(sanitized.contains("response.output_item.done"));
+        assert!(sanitized.contains("partial_image_b64"));
+        assert!(sanitized.contains("result"));
+        assert!(sanitized.contains("<redacted string len=2048>"));
+    }
+
     #[tokio::test]
     async fn parses_items_and_completed() {
         let item1 = json!({
@@ -727,6 +834,125 @@ mod tests {
             }
             other => panic!("unexpected third event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn parses_image_generation_call_added_without_result() {
+        let events = run_sse(vec![
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "ig_123",
+                    "type": "image_generation_call",
+                    "status": "in_progress"
+                }
+            }),
+            json!({
+                "type": "response.completed",
+                "response": { "id": "resp1" }
+            }),
+        ])
+        .await;
+
+        assert_matches!(
+            &events[0],
+            ResponseEvent::OutputItemAdded(ResponseItem::ImageGenerationCall {
+                id,
+                status,
+                model: None,
+                size: None,
+                revised_prompt: None,
+                result,
+            }) if id == "ig_123" && status == "in_progress" && result.is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn parses_reasoning_added_without_summary() {
+        let events = run_sse(vec![
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "rs_123",
+                    "type": "reasoning",
+                    "status": "in_progress"
+                }
+            }),
+            json!({
+                "type": "response.reasoning_summary_part.added",
+                "summary_index": 0
+            }),
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 0,
+                "delta": "用户"
+            }),
+            json!({
+                "type": "response.completed",
+                "response": { "id": "resp1" }
+            }),
+        ])
+        .await;
+
+        assert_matches!(
+            &events[0],
+            ResponseEvent::OutputItemAdded(ResponseItem::Reasoning {
+                id,
+                summary,
+                content: None,
+                encrypted_content: None,
+            }) if id == "rs_123" && summary.is_empty()
+        );
+
+        assert_matches!(
+            &events[1],
+            ResponseEvent::ReasoningSummaryPartAdded { summary_index: 0 }
+        );
+
+        assert_matches!(
+            &events[2],
+            ResponseEvent::ReasoningSummaryDelta {
+                summary_index: 0,
+                delta,
+            } if delta == "用户"
+        );
+    }
+
+    #[tokio::test]
+    async fn parses_message_added_without_content() {
+        let events = run_sse(vec![
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "msg_123",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress"
+                }
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "content_index": 0,
+                "delta": "请"
+            }),
+            json!({
+                "type": "response.completed",
+                "response": { "id": "resp1" }
+            }),
+        ])
+        .await;
+
+        assert_matches!(
+            &events[0],
+            ResponseEvent::OutputItemAdded(ResponseItem::Message {
+                id: Some(id),
+                role,
+                content,
+                phase: None,
+            }) if id == "msg_123" && role == "assistant" && content.is_empty()
+        );
+
+        assert_matches!(&events[1], ResponseEvent::OutputTextDelta(delta) if delta == "请");
     }
 
     #[tokio::test]

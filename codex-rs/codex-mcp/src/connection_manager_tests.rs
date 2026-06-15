@@ -711,6 +711,39 @@ async fn resolve_tool_info_accepts_canonical_namespaced_tool_names() {
 }
 
 #[tokio::test]
+async fn resolve_tool_info_does_not_block_for_plain_tool_names() {
+    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+        .boxed()
+        .shared();
+    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager =
+        McpConnectionManager::new_uninitialized(&approval_policy, &permission_profile);
+    manager.clients.insert(
+        "rmcp".to_string(),
+        AsyncManagedClient {
+            client: pending_client,
+            startup_snapshot: None,
+            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
+            cancel_token: CancellationToken::new(),
+        },
+    );
+
+    let timeout_result = tokio::time::timeout(
+        Duration::from_millis(10),
+        manager.resolve_tool_info(&ToolName::plain("exec_command")),
+    )
+    .await;
+
+    assert!(
+        timeout_result
+            .expect("plain tool lookup should not block")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn list_all_tools_blocks_while_client_is_pending_without_startup_snapshot() {
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()

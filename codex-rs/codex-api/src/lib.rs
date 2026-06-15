@@ -31,6 +31,7 @@ pub use crate::common::Reasoning;
 pub use crate::common::ResponseCreateWsRequest;
 pub use crate::common::ResponseEvent;
 pub use crate::common::ResponseStream;
+pub use crate::common::ResponsesApiInputItem;
 pub use crate::common::ResponsesApiRequest;
 pub use crate::common::ResponsesWsRequest;
 pub use crate::common::TextControls;

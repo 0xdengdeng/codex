@@ -21,6 +21,7 @@ use tracing::info;
 
 const MODEL_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
+const GPT_5_5_CONTEXT_WINDOW: i64 = 272_000;
 
 /// Remote endpoint used by the OpenAI-compatible model manager.
 ///
@@ -31,6 +32,9 @@ const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
     /// Returns whether this provider can authenticate command-scoped requests.
     fn has_command_auth(&self) -> bool;
+
+    /// Returns whether this provider has provider-scoped credentials available.
+    fn has_provider_auth(&self) -> bool;
 
     /// Returns whether the currently resolved auth can use Codex backend-only models.
     async fn uses_codex_backend(&self) -> bool;
@@ -301,6 +305,7 @@ impl OpenAiModelsManager {
     async fn fetch_and_update_models(&self) -> CoreResult<()> {
         let client_version = crate::client_version_to_whole();
         let (models, etag) = self.endpoint_client.list_models(&client_version).await?;
+        let models = normalize_remote_model_manifests(models);
         self.apply_remote_models(models.clone()).await;
         *self.etag.write().await = etag.clone();
         self.cache_manager
@@ -310,7 +315,9 @@ impl OpenAiModelsManager {
     }
 
     async fn should_refresh_models(&self) -> bool {
-        self.endpoint_client.uses_codex_backend().await || self.endpoint_client.has_command_auth()
+        self.endpoint_client.uses_codex_backend().await
+            || self.endpoint_client.has_command_auth()
+            || self.endpoint_client.has_provider_auth()
     }
 
     async fn get_etag(&self) -> Option<String> {
@@ -320,7 +327,7 @@ impl OpenAiModelsManager {
     /// Replace the cached remote models and rebuild the derived presets list.
     async fn apply_remote_models(&self, models: Vec<ModelInfo>) {
         let mut existing_models = load_remote_models_from_file().unwrap_or_default();
-        for model in models {
+        for model in normalize_remote_model_manifests(models) {
             if let Some(existing_index) = existing_models
                 .iter()
                 .position(|existing| existing.slug == model.slug)
@@ -358,6 +365,30 @@ impl OpenAiModelsManager {
         );
         true
     }
+}
+
+fn normalize_remote_model_manifests(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    models
+        .into_iter()
+        .map(normalize_remote_model_manifest)
+        .collect()
+}
+
+fn normalize_remote_model_manifest(mut model: ModelInfo) -> ModelInfo {
+    if model.slug == "gpt-5.5" {
+        model.context_window = Some(GPT_5_5_CONTEXT_WINDOW);
+        model.max_context_window = Some(GPT_5_5_CONTEXT_WINDOW);
+    }
+    let normalized_base_instructions = model_info::normalize_base_instructions_for_model(
+        &model.slug,
+        &model.display_name,
+        &model.base_instructions,
+    );
+    if normalized_base_instructions != model.base_instructions {
+        model.base_instructions = normalized_base_instructions;
+        model.model_messages = None;
+    }
+    model
 }
 
 #[async_trait]

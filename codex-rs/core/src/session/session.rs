@@ -178,6 +178,12 @@ impl SessionConfiguration {
                 });
         if let Some(collaboration_mode) = updates.collaboration_mode.clone() {
             next_configuration.collaboration_mode = collaboration_mode;
+            next_configuration.base_instructions =
+                codex_models_manager::model_info::normalize_base_instructions_for_model(
+                    next_configuration.collaboration_mode.model(),
+                    next_configuration.collaboration_mode.model(),
+                    &next_configuration.base_instructions,
+                );
         }
         if let Some(summary) = updates.reasoning_summary {
             next_configuration.model_reasoning_summary = Some(summary);

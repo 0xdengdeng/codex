@@ -1,4 +1,4 @@
-use super::turn_context::image_generation_tool_auth_allowed;
+use super::turn_context::image_generation_tool_allowed;
 use super::*;
 use std::sync::atomic::AtomicBool;
 
@@ -34,9 +34,10 @@ pub(super) async fn spawn_review_thread(
             .list_models(RefreshStrategy::OnlineIfUncached)
             .await,
         features: &review_features,
-        image_generation_tool_auth_allowed: image_generation_tool_auth_allowed(Some(
-            sess.services.auth_manager.as_ref(),
-        )),
+        image_generation_tool_allowed: image_generation_tool_allowed(
+            Some(sess.services.auth_manager.as_ref()),
+            provider_capabilities.image_generation,
+        ),
         web_search_mode: Some(review_web_search_mode),
         session_source: parent_turn_context.session_source.clone(),
         permission_profile: &parent_turn_context.permission_profile,

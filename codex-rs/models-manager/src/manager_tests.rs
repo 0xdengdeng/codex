@@ -73,6 +73,7 @@ fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
 #[derive(Debug)]
 struct TestModelsEndpoint {
     has_command_auth: bool,
+    has_provider_auth: bool,
     uses_codex_backend: bool,
     responses: Mutex<VecDeque<Vec<ModelInfo>>>,
     fetch_count: AtomicUsize,
@@ -82,6 +83,7 @@ impl TestModelsEndpoint {
     fn new(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
             has_command_auth: false,
+            has_provider_auth: false,
             uses_codex_backend: true,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
@@ -91,6 +93,17 @@ impl TestModelsEndpoint {
     fn without_refresh(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
             has_command_auth: false,
+            has_provider_auth: false,
+            uses_codex_backend: false,
+            responses: Mutex::new(responses.into()),
+            fetch_count: AtomicUsize::new(0),
+        })
+    }
+
+    fn with_provider_auth(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
+        Arc::new(Self {
+            has_command_auth: false,
+            has_provider_auth: true,
             uses_codex_backend: false,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
@@ -148,6 +161,10 @@ impl ExternalAuth for TestUnresolvedExternalApiKeyAuth {
 impl ModelsEndpointClient for TestModelsEndpoint {
     fn has_command_auth(&self) -> bool {
         self.has_command_auth
+    }
+
+    fn has_provider_auth(&self) -> bool {
+        self.has_provider_auth
     }
 
     async fn uses_codex_backend(&self) -> bool {
@@ -378,6 +395,60 @@ async fn refresh_available_models_uses_cache_when_fresh() {
 }
 
 #[tokio::test]
+async fn refresh_available_models_clamps_gpt_5_5_context_window() {
+    let mut remote = remote_model("gpt-5.5", "GPT-5.5", /*priority*/ 0);
+    remote.context_window = Some(1_050_000);
+    remote.max_context_window = Some(1_050_000);
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![vec![remote]]);
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+
+    manager
+        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
+        .await
+        .expect("refresh succeeds");
+
+    let gpt_5_5 = manager
+        .get_remote_models()
+        .await
+        .into_iter()
+        .find(|model| model.slug == "gpt-5.5")
+        .expect("gpt-5.5 should be present");
+    assert_eq!(gpt_5_5.context_window, Some(272_000));
+    assert_eq!(gpt_5_5.max_context_window, Some(272_000));
+}
+
+#[tokio::test]
+async fn refresh_available_models_rewrites_gpt_identity_for_third_party_models() {
+    let mut remote = remote_model(
+        "doubao-seed-2-0-code-preview-260215",
+        "Doubao Seed 2.0 Code Preview 260215",
+        /*priority*/ 0,
+    );
+    remote.base_instructions =
+        "You are Codex, a coding agent based on GPT-5.\n\n# General\nUse tools carefully."
+            .to_string();
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![vec![remote]]);
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+
+    manager
+        .refresh_available_models(RefreshStrategy::OnlineIfUncached)
+        .await
+        .expect("refresh succeeds");
+
+    let doubao = manager
+        .get_remote_models()
+        .await
+        .into_iter()
+        .find(|model| model.slug == "doubao-seed-2-0-code-preview-260215")
+        .expect("doubao should be present");
+    assert!(!doubao.base_instructions.contains("GPT-5"));
+    assert!(!doubao.base_instructions.contains("Codex"));
+    assert!(doubao.base_instructions.contains("coding agent"));
+}
+
+#[tokio::test]
 async fn refresh_available_models_refetches_when_cache_stale() {
     let initial_models = vec![remote_model("stale", "Stale", /*priority*/ 1)];
     let codex_home = tempdir().expect("temp dir");
@@ -523,6 +594,41 @@ async fn refresh_available_models_skips_network_without_chatgpt_auth() {
     );
 }
 
+#[tokio::test]
+async fn refresh_available_models_fetches_with_provider_env_auth() {
+    let dynamic_slug = "dynamic-model-only-for-test-provider-env-auth";
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::with_provider_auth(vec![vec![remote_model(
+        dynamic_slug,
+        "Provider Env Auth",
+        /*priority*/ 1,
+    )]]);
+    let manager = openai_manager_for_tests_with_auth(
+        codex_home.path().to_path_buf(),
+        endpoint.clone(),
+        /*auth_manager*/ None,
+    );
+
+    manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("refresh should fetch with provider env auth");
+
+    assert!(
+        manager
+            .get_remote_models()
+            .await
+            .iter()
+            .any(|candidate| candidate.slug == dynamic_slug),
+        "remote refresh should include models fetched with provider env auth"
+    );
+    assert_eq!(
+        endpoint.fetch_count(),
+        1,
+        "endpoint should fetch models with provider env auth"
+    );
+}
+
 #[derive(Debug)]
 struct TestAuthAwareModelsEndpoint {
     auth_manager: Option<Arc<AuthManager>>,
@@ -547,6 +653,10 @@ impl TestAuthAwareModelsEndpoint {
 #[async_trait]
 impl ModelsEndpointClient for TestAuthAwareModelsEndpoint {
     fn has_command_auth(&self) -> bool {
+        false
+    }
+
+    fn has_provider_auth(&self) -> bool {
         false
     }
 

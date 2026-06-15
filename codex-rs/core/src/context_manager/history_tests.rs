@@ -514,11 +514,13 @@ fn for_prompt_strips_images_when_model_does_not_support_images() {
 }
 
 #[test]
-fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
+fn for_prompt_preserves_image_generation_result_when_images_are_supported() {
     let history = create_history_with_items(vec![
         ResponseItem::ImageGenerationCall {
             id: "ig_123".to_string(),
             status: "generating".to_string(),
+            model: None,
+            size: None,
             revised_prompt: Some("lobster".to_string()),
             result: "Zm9v".to_string(),
         },
@@ -538,6 +540,8 @@ fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
             ResponseItem::ImageGenerationCall {
                 id: "ig_123".to_string(),
                 status: "generating".to_string(),
+                model: None,
+                size: None,
                 revised_prompt: Some("lobster".to_string()),
                 result: "Zm9v".to_string(),
             },
@@ -567,6 +571,8 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
         ResponseItem::ImageGenerationCall {
             id: "ig_123".to_string(),
             status: "completed".to_string(),
+            model: None,
+            size: None,
             revised_prompt: Some("lobster".to_string()),
             result: "Zm9v".to_string(),
         },
@@ -586,6 +592,8 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
             ResponseItem::ImageGenerationCall {
                 id: "ig_123".to_string(),
                 status: "completed".to_string(),
+                model: None,
+                size: None,
                 revised_prompt: Some("lobster".to_string()),
                 result: String::new(),
             },

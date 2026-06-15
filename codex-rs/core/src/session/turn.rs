@@ -19,6 +19,7 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
+use crate::context_manager::ContextManager;
 use crate::feedback_tags;
 use crate::hook_runtime::PendingInputHookDisposition;
 use crate::hook_runtime::emit_hook_completed_events;
@@ -50,6 +51,8 @@ use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
 use crate::stream_events_utils::raw_assistant_output_text_from_item;
 use crate::stream_events_utils::record_completed_response_item;
+use crate::stream_events_utils::rehydrate_image_generation_results_from_artifacts;
+use crate::stream_events_utils::retain_image_generation_calls_with_results;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::parallel::ToolCallRuntime;
@@ -75,6 +78,8 @@ use codex_hooks::HookResult;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::items::AgentMessageContent;
+use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
@@ -115,6 +120,31 @@ use tracing::instrument;
 use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
+
+async fn history_for_prompt(
+    history: ContextManager,
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> Vec<ResponseItem> {
+    let mut items = if turn_context.tools_config.image_gen_tool {
+        history.for_prompt_preserving_image_generation_results(
+            &turn_context.model_info.input_modalities,
+        )
+    } else {
+        history.for_prompt(&turn_context.model_info.input_modalities)
+    };
+    if turn_context.tools_config.image_gen_tool {
+        let session_id = sess.conversation_id.to_string();
+        rehydrate_image_generation_results_from_artifacts(
+            &turn_context.config.codex_home,
+            &session_id,
+            &mut items,
+        )
+        .await;
+        retain_image_generation_calls_with_results(&mut items);
+    }
+    items
+}
 
 /// Takes a user message as input and runs a loop where, at each sampling request, the model
 /// replies with either:
@@ -429,9 +459,12 @@ pub(crate) async fn run_turn(
 
         // Construct the input that we will send to the model.
         let sampling_request_input: Vec<ResponseItem> = {
-            sess.clone_history()
-                .await
-                .for_prompt(&turn_context.model_info.input_modalities)
+            history_for_prompt(
+                sess.clone_history().await,
+                sess.as_ref(),
+                turn_context.as_ref(),
+            )
+            .await
         };
 
         let sampling_request_input_messages = sampling_request_input
@@ -1035,9 +1068,12 @@ async fn run_sampling_request(
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
-            sess.clone_history()
-                .await
-                .for_prompt(&turn_context.model_info.input_modalities)
+            history_for_prompt(
+                sess.clone_history().await,
+                sess.as_ref(),
+                turn_context.as_ref(),
+            )
+            .await
         };
         let prompt = build_prompt(
             prompt_input,
@@ -1694,6 +1730,88 @@ async fn maybe_complete_plan_item_from_message(
     }
 }
 
+fn empty_streaming_agent_message_item(item: &ResponseItem) -> Option<TurnItem> {
+    let ResponseItem::Message {
+        id,
+        role,
+        content,
+        phase,
+    } = item
+    else {
+        return None;
+    };
+    if role != "assistant" {
+        return None;
+    }
+    let existing_text = content
+        .iter()
+        .filter_map(|entry| match entry {
+            ContentItem::OutputText { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    if !existing_text.is_empty() {
+        return None;
+    }
+    let id = id.clone()?;
+    Some(TurnItem::AgentMessage(AgentMessageItem {
+        id,
+        content: vec![AgentMessageContent::Text {
+            text: String::new(),
+        }],
+        phase: phase.clone(),
+        memory_citation: None,
+    }))
+}
+
+fn fill_empty_assistant_message_from_streamed_text(
+    item: &mut ResponseItem,
+    streamed_text: Option<String>,
+) {
+    let Some(streamed_text) = streamed_text else {
+        return;
+    };
+    if streamed_text.is_empty() {
+        return;
+    }
+    let ResponseItem::Message { role, content, .. } = item else {
+        return;
+    };
+    if role != "assistant" {
+        return;
+    }
+    let existing_text = content
+        .iter()
+        .filter_map(|entry| match entry {
+            ContentItem::OutputText { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    if existing_text.is_empty() {
+        *content = vec![ContentItem::OutputText {
+            text: streamed_text,
+        }];
+    }
+}
+
+fn completed_final_answer_after_stream_error(
+    err: &CodexErr,
+    last_agent_message: &Option<String>,
+    needs_follow_up: bool,
+    active_item: &Option<TurnItem>,
+) -> bool {
+    let is_missing_response_completed = matches!(
+        err,
+        CodexErr::Stream(message, _)
+            if message == "stream closed before response.completed"
+                || message == "idle timeout waiting for SSE"
+    );
+    is_missing_response_completed
+        && last_agent_message.is_some()
+        && !needs_follow_up
+        && active_item.is_none()
+}
+
 /// Emit a completed agent message in plan mode, respecting deferred starts.
 async fn emit_agent_message_in_plan_mode(
     sess: &Session,
@@ -1878,6 +1996,7 @@ async fn try_run_sampling_request(
     let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
+    let mut raw_assistant_text_by_item: HashMap<String, String> = HashMap::new();
     let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
     let receiving_span = trace_span!("receiving_stream");
     let outcome: CodexResult<SamplingRequestResult> = loop {
@@ -1907,12 +2026,34 @@ async fn try_run_sampling_request(
 
         let event = match event {
             Some(Ok(event)) => event,
-            Some(Err(err)) => break Err(err),
+            Some(Err(err)) => {
+                if completed_final_answer_after_stream_error(
+                    &err,
+                    &last_agent_message,
+                    needs_follow_up,
+                    &active_item,
+                ) {
+                    break Ok(SamplingRequestResult {
+                        needs_follow_up,
+                        last_agent_message,
+                    });
+                }
+                break Err(err);
+            }
             None => {
-                break Err(CodexErr::Stream(
-                    "stream closed before response.completed".into(),
-                    None,
-                ));
+                let err = CodexErr::Stream("stream closed before response.completed".into(), None);
+                if completed_final_answer_after_stream_error(
+                    &err,
+                    &last_agent_message,
+                    needs_follow_up,
+                    &active_item,
+                ) {
+                    break Ok(SamplingRequestResult {
+                        needs_follow_up,
+                        last_agent_message,
+                    });
+                }
+                break Err(err);
             }
         };
 
@@ -1923,7 +2064,7 @@ async fn try_run_sampling_request(
 
         match event {
             ResponseEvent::Created => {}
-            ResponseEvent::OutputItemDone(item) => {
+            ResponseEvent::OutputItemDone(mut item) => {
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()
                 {
@@ -1942,6 +2083,8 @@ async fn try_run_sampling_request(
                         &item_id,
                     )
                     .await;
+                    let streamed_text = raw_assistant_text_by_item.remove(&item_id);
+                    fill_empty_assistant_message_from_streamed_text(&mut item, streamed_text);
                 }
                 if let Some(state) = plan_mode_state.as_mut()
                     && handle_assistant_item_done_in_plan_mode(
@@ -2022,6 +2165,7 @@ async fn try_run_sampling_request(
                     plan_mode,
                 )
                 .await
+                .or_else(|| empty_streaming_agent_message_item(&item))
                 {
                     let mut turn_item = turn_item;
                     let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
@@ -2030,6 +2174,9 @@ async fn try_run_sampling_request(
                         && let Some(raw_text) = raw_assistant_output_text_from_item(&item)
                     {
                         let item_id = turn_item.id();
+                        if !raw_text.is_empty() {
+                            raw_assistant_text_by_item.insert(item_id.clone(), raw_text.clone());
+                        }
                         let mut seeded =
                             assistant_message_stream_parsers.seed_item_text(&item_id, &raw_text);
                         if let TurnItem::AgentMessage(agent_message) = &mut turn_item {
@@ -2135,6 +2282,10 @@ async fn try_run_sampling_request(
                 if let Some(active) = active_item.as_ref() {
                     let item_id = active.id();
                     if matches!(active, TurnItem::AgentMessage(_)) {
+                        raw_assistant_text_by_item
+                            .entry(item_id.clone())
+                            .or_default()
+                            .push_str(&delta);
                         let parsed = assistant_message_stream_parsers.parse_delta(&item_id, &delta);
                         emit_streamed_assistant_text_delta(
                             &sess,

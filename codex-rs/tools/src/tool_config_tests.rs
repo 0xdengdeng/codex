@@ -60,7 +60,7 @@ fn model_provided_unified_exec_requires_feature_flag() {
         model_info: &model_info,
         available_models: &available_models,
         features: &features,
-        image_generation_tool_auth_allowed: true,
+        image_generation_tool_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         permission_profile: &PermissionProfile::Disabled,
@@ -81,7 +81,7 @@ fn unified_exec_can_be_enabled_for_restricted_token_workspace_write() {
         model_info: &model_info,
         available_models: &available_models,
         features: &features,
-        image_generation_tool_auth_allowed: true,
+        image_generation_tool_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         permission_profile: &PermissionProfile::workspace_write(),
@@ -108,7 +108,7 @@ fn shell_zsh_fork_prefers_shell_command_over_unified_exec() {
         model_info: &model_info,
         available_models: &available_models,
         features: &features,
-        image_generation_tool_auth_allowed: true,
+        image_generation_tool_allowed: true,
         web_search_mode: Some(WebSearchMode::Live),
         session_source: SessionSource::Cli,
         permission_profile: &PermissionProfile::Disabled,
@@ -166,7 +166,7 @@ fn subagents_keep_request_user_input_config_and_agent_jobs_workers_opt_in_by_lab
         model_info: &model_info,
         available_models: &available_models,
         features: &features,
-        image_generation_tool_auth_allowed: true,
+        image_generation_tool_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::SubAgent(SubAgentSource::Other(
             "agent_job:test".to_string(),
@@ -184,10 +184,10 @@ fn subagents_keep_request_user_input_config_and_agent_jobs_workers_opt_in_by_lab
 }
 
 #[test]
-fn image_generation_requires_feature_and_supported_model() {
+fn image_generation_requires_feature_and_provider_gate() {
     let supported_model_info = model_info();
-    let mut unsupported_model_info = supported_model_info.clone();
-    unsupported_model_info.input_modalities = vec![InputModality::Text];
+    let mut text_only_model_info = supported_model_info.clone();
+    text_only_model_info.input_modalities = vec![InputModality::Text];
 
     let mut image_generation_disabled_features = Features::with_defaults();
     image_generation_disabled_features.disable(Feature::ImageGeneration);
@@ -199,7 +199,7 @@ fn image_generation_requires_feature_and_supported_model() {
         model_info: &supported_model_info,
         available_models: &available_models,
         features: &image_generation_disabled_features,
-        image_generation_tool_auth_allowed: true,
+        image_generation_tool_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         permission_profile: &PermissionProfile::Disabled,
@@ -209,7 +209,7 @@ fn image_generation_requires_feature_and_supported_model() {
         model_info: &supported_model_info,
         available_models: &available_models,
         features: &image_generation_features,
-        image_generation_tool_auth_allowed: true,
+        image_generation_tool_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         permission_profile: &PermissionProfile::Disabled,
@@ -219,17 +219,17 @@ fn image_generation_requires_feature_and_supported_model() {
         model_info: &supported_model_info,
         available_models: &available_models,
         features: &image_generation_features,
-        image_generation_tool_auth_allowed: false,
+        image_generation_tool_allowed: false,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         permission_profile: &PermissionProfile::Disabled,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
-    let unsupported_tools_config = ToolsConfig::new(&ToolsConfigParams {
-        model_info: &unsupported_model_info,
+    let text_only_tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &text_only_model_info,
         available_models: &available_models,
         features: &image_generation_features,
-        image_generation_tool_auth_allowed: true,
+        image_generation_tool_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         permission_profile: &PermissionProfile::Disabled,
@@ -238,7 +238,7 @@ fn image_generation_requires_feature_and_supported_model() {
     assert!(!default_tools_config.image_gen_tool);
     assert!(supported_tools_config.image_gen_tool);
     assert!(!auth_disallowed_tools_config.image_gen_tool);
-    assert!(!unsupported_tools_config.image_gen_tool);
+    assert!(text_only_tools_config.image_gen_tool);
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn provider_capability_methods_disable_provider_bound_tool_surfaces() {
         model_info: &model_info,
         available_models: &available_models,
         features: &features,
-        image_generation_tool_auth_allowed: true,
+        image_generation_tool_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         permission_profile: &PermissionProfile::Disabled,

@@ -210,8 +210,10 @@ async fn skill_roots_from_layer_stack_includes_disabled_project_layers() -> anyh
     let tmp = tempfile::tempdir()?;
 
     let home_folder = tmp.path().join("home");
+    let workspace_folder = tmp.path().join("workspace");
     let user_folder = home_folder.join("codex");
     fs::create_dir_all(&user_folder)?;
+    fs::create_dir_all(&workspace_folder)?;
 
     let project_root = tmp.path().join("repo");
     let dot_codex = project_root.join(".codex");
@@ -276,8 +278,10 @@ async fn loads_skills_from_home_agents_dir_for_user_scope() -> anyhow::Result<()
     let tmp = tempfile::tempdir()?;
 
     let home_folder = tmp.path().join("home");
+    let workspace_folder = tmp.path().join("workspace");
     let user_folder = home_folder.join("codex");
     fs::create_dir_all(&user_folder)?;
+    fs::create_dir_all(&workspace_folder)?;
 
     let user_file = user_folder.join("config.toml").abs();
     let layers = vec![ConfigLayerEntry::new(
@@ -324,6 +328,63 @@ async fn loads_skills_from_home_agents_dir_for_user_scope() -> anyhow::Result<()
             scope: SkillScope::User,
             plugin_id: None,
         }]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn can_skip_home_agents_dir_for_managed_runtime_isolation() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+
+    let home_folder = tmp.path().join("home");
+    let workspace_folder = tmp.path().join("workspace");
+    let user_folder = home_folder.join("codex");
+    fs::create_dir_all(&user_folder)?;
+    fs::create_dir_all(&workspace_folder)?;
+
+    let user_file = user_folder.join("config.toml").abs();
+    let layers = vec![ConfigLayerEntry::new(
+        ConfigLayerSource::User { file: user_file },
+        TomlValue::Table(toml::map::Map::new()),
+    )];
+    let stack = ConfigLayerStack::new(
+        layers,
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )?;
+
+    write_skill_at(
+        &home_folder.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
+        "agents-home",
+        "agents-home-skill",
+        "from home agents",
+    );
+
+    let home_folder_abs = home_folder.abs();
+    let workspace_folder_abs = workspace_folder.abs();
+    let roots = skill_roots_with_home_dir(
+        Some(Arc::clone(&LOCAL_FS)),
+        &stack,
+        &workspace_folder_abs,
+        Some(&home_folder_abs),
+        Vec::new(),
+        /*include_home_agents_skills*/ false,
+    )
+    .await;
+    let outcome = load_skills_from_roots(roots).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert!(
+        outcome
+            .skills
+            .iter()
+            .all(|skill| skill.name != "agents-home-skill"),
+        "home .agents skill should not load when home agents roots are disabled"
     );
 
     Ok(())

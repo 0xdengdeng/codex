@@ -100,7 +100,7 @@ async fn tools_config_for_mcp_tool_exposure(search_tool: bool) -> ToolsConfig {
         model_info: &model_info,
         available_models: &available_models,
         features: &features,
-        image_generation_tool_auth_allowed: true,
+        image_generation_tool_allowed: true,
         web_search_mode: Some(WebSearchMode::Cached),
         session_source: SessionSource::Cli,
         permission_profile: &PermissionProfile::Disabled,

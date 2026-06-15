@@ -1806,6 +1806,8 @@ impl HasLegacyEvent for ItemStartedEvent {
             TurnItem::ImageGeneration(item) => {
                 vec![EventMsg::ImageGenerationBegin(ImageGenerationBeginEvent {
                     call_id: item.id.clone(),
+                    model: item.model.clone(),
+                    size: item.size.clone(),
                 })]
             }
             TurnItem::FileChange(item) => vec![item.as_legacy_begin_event(self.turn_id.clone())],
@@ -2367,12 +2369,24 @@ pub struct WebSearchEndEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ImageGenerationBeginEvent {
     pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub size: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ImageGenerationEndEvent {
     pub call_id: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub size: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub revised_prompt: Option<String>,
@@ -4623,6 +4637,8 @@ mod tests {
             item: TurnItem::ImageGeneration(ImageGenerationItem {
                 id: "ig-1".into(),
                 status: "in_progress".into(),
+                model: Some("gpt-image-2".into()),
+                size: Some("1024x1536".into()),
                 revised_prompt: None,
                 result: String::new(),
                 saved_path: None,
@@ -4633,7 +4649,11 @@ mod tests {
         let legacy_events = event.as_legacy_events(/*show_raw_agent_reasoning*/ false);
         assert_eq!(legacy_events.len(), 1);
         match &legacy_events[0] {
-            EventMsg::ImageGenerationBegin(event) => assert_eq!(event.call_id, "ig-1"),
+            EventMsg::ImageGenerationBegin(event) => {
+                assert_eq!(event.call_id, "ig-1");
+                assert_eq!(event.model.as_deref(), Some("gpt-image-2"));
+                assert_eq!(event.size.as_deref(), Some("1024x1536"));
+            }
             _ => panic!("expected ImageGenerationBegin event"),
         }
     }
@@ -4717,6 +4737,8 @@ mod tests {
             item: TurnItem::ImageGeneration(ImageGenerationItem {
                 id: "ig-1".into(),
                 status: "completed".into(),
+                model: Some("gpt-image-2".into()),
+                size: Some("1024x1536".into()),
                 revised_prompt: Some("A tiny blue square".into()),
                 result: "Zm9v".into(),
                 saved_path: Some(test_path_buf("/tmp/ig-1.png").abs()),
@@ -4730,6 +4752,8 @@ mod tests {
             EventMsg::ImageGenerationEnd(event) => {
                 assert_eq!(event.call_id, "ig-1");
                 assert_eq!(event.status, "completed");
+                assert_eq!(event.model.as_deref(), Some("gpt-image-2"));
+                assert_eq!(event.size.as_deref(), Some("1024x1536"));
                 assert_eq!(event.revised_prompt.as_deref(), Some("A tiny blue square"));
                 assert_eq!(event.result, "Zm9v");
                 assert_eq!(

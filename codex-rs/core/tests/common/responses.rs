@@ -814,6 +814,37 @@ pub fn ev_image_generation_call(
     })
 }
 
+pub fn ev_image_generation_call_with_size(
+    id: &str,
+    status: &str,
+    revised_prompt: &str,
+    result: &str,
+    size: &str,
+) -> Value {
+    serde_json::json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "image_generation_call",
+            "id": id,
+            "status": status,
+            "revised_prompt": revised_prompt,
+            "result": result,
+            "size": size,
+        }
+    })
+}
+
+pub fn ev_image_generation_call_added_partial(id: &str, status: &str) -> Value {
+    serde_json::json!({
+        "type": "response.output_item.added",
+        "item": {
+            "type": "image_generation_call",
+            "id": id,
+            "status": status,
+        }
+    })
+}
+
 pub fn ev_function_call(call_id: &str, name: &str, arguments: &str) -> Value {
     serde_json::json!({
         "type": "response.output_item.done",

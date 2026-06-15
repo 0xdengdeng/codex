@@ -121,6 +121,21 @@ impl ContextManager {
         self.items
     }
 
+    /// Returns prompt history while preserving native image generation results.
+    ///
+    /// This is used when the native `image_generation` tool is available even if
+    /// the main text model does not accept user image attachments.
+    pub(crate) fn for_prompt_preserving_image_generation_results(
+        mut self,
+        input_modalities: &[InputModality],
+    ) -> Vec<ResponseItem> {
+        self.normalize_history_with_options(
+            input_modalities,
+            /*preserve_image_generation_results*/ true,
+        );
+        self.items
+    }
+
     /// Returns raw items in the history.
     pub(crate) fn raw_items(&self) -> &[ResponseItem] {
         &self.items
@@ -359,6 +374,17 @@ impl ContextManager {
     /// 2. every output has a corresponding call entry
     /// 3. when images are unsupported, image content is stripped from messages and tool outputs
     fn normalize_history(&mut self, input_modalities: &[InputModality]) {
+        self.normalize_history_with_options(
+            input_modalities,
+            /*preserve_image_generation_results*/ false,
+        );
+    }
+
+    fn normalize_history_with_options(
+        &mut self,
+        input_modalities: &[InputModality],
+        preserve_image_generation_results: bool,
+    ) {
         // all function/tool calls must have a corresponding output
         normalize::ensure_call_outputs_present(&mut self.items);
 
@@ -366,7 +392,11 @@ impl ContextManager {
         normalize::remove_orphan_outputs(&mut self.items);
 
         // strip images when model does not support them
-        normalize::strip_images_when_unsupported(input_modalities, &mut self.items);
+        normalize::strip_images_when_unsupported(
+            input_modalities,
+            preserve_image_generation_results,
+            &mut self.items,
+        );
     }
 
     fn process_item(&self, item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
@@ -487,9 +517,9 @@ fn is_api_message(message: &ResponseItem) -> bool {
         | ResponseItem::LocalShellCall { .. }
         | ResponseItem::Reasoning { .. }
         | ResponseItem::WebSearchCall { .. }
-        | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::ContextCompaction { .. } => true,
+        ResponseItem::ImageGenerationCall { result, .. } => !result.trim().is_empty(),
         ResponseItem::Other => false,
     }
 }

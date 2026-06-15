@@ -553,6 +553,88 @@ async fn generated_image_is_replayed_for_image_capable_models() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn done_generated_image_without_result_is_not_replayed() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    let image_model_slug = "test-image-model";
+    let image_model = test_model_info(
+        image_model_slug,
+        "Test Image Model",
+        "supports image input",
+        default_input_modalities(),
+    );
+    mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![image_model],
+        },
+    )
+    .await;
+
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_image_generation_call("ig_done_without_result", "generating", "", ""),
+                ev_completed_with_tokens("resp-1", /*total_tokens*/ 10),
+            ]),
+            sse_completed("resp-2"),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(move |config| {
+            config.model = Some(image_model_slug.to_string());
+        });
+    let test = builder.build(&server).await?;
+    let models_manager = test.thread_manager.get_models_manager();
+    let _ = models_manager
+        .list_models(RefreshStrategy::OnlineIfUncached)
+        .await;
+
+    test.codex
+        .submit(read_only_user_turn(
+            &test,
+            vec![UserInput::Text {
+                text: "generate an image".to_string(),
+                text_elements: Vec::new(),
+            }],
+            image_model_slug.to_string(),
+        ))
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    test.codex
+        .submit(read_only_user_turn(
+            &test,
+            vec![UserInput::Text {
+                text: "continue".to_string(),
+                text_elements: Vec::new(),
+            }],
+            image_model_slug.to_string(),
+        ))
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2, "expected two model requests");
+
+    let second_request = requests.last().expect("expected second request");
+    assert!(
+        second_request
+            .inputs_of_type("image_generation_call")
+            .is_empty(),
+        "done generated image without a result should not be replayed"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_change_from_generated_image_to_text_preserves_prior_generated_image_call()
 -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -654,8 +736,8 @@ async fn model_change_from_generated_image_to_text_preserves_prior_generated_ima
     );
     assert_eq!(
         image_generation_calls[0]["result"].as_str(),
-        Some(""),
-        "second request should strip generated image bytes for text-only models"
+        Some("Zm9v"),
+        "second request should preserve generated image bytes when native image generation is available"
     );
     assert!(
         second_request

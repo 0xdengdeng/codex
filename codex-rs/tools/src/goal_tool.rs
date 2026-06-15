@@ -84,7 +84,7 @@ When marking a budgeted goal achieved with status `complete`, report the final t
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            /*required*/ Some(vec!["status".to_string()]),
+            /*required*/ Some(Vec::new()),
             Some(false.into()),
         ),
         output_schema: None,
@@ -108,5 +108,14 @@ mod tests {
             .expect("status property should exist");
 
         assert_eq!(status.enum_values, Some(vec![json!("complete")]));
+    }
+
+    #[test]
+    fn update_goal_tool_does_not_require_status_server_side() {
+        let ToolSpec::Function(tool) = create_update_goal_tool() else {
+            panic!("update_goal should be a function tool");
+        };
+
+        assert_eq!(tool.parameters.required, Some(Vec::new()));
     }
 }

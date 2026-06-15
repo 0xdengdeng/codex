@@ -542,11 +542,8 @@ impl Codex {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
-        let base_instructions = config
-            .base_instructions
-            .clone()
-            .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
-            .unwrap_or_else(|| model_info.get_model_instructions(config.personality));
+        let base_instructions =
+            resolve_base_instructions(&config, &conversation_history, &model_info);
 
         // Respect thread-start tools. When missing (resumed/forked threads), read from the db
         // first, then fall back to rollout-file tools.
@@ -3262,6 +3259,24 @@ impl Session {
     fn show_raw_agent_reasoning(&self) -> bool {
         self.services.show_raw_agent_reasoning
     }
+}
+
+fn resolve_base_instructions(
+    config: &Config,
+    conversation_history: &InitialHistory,
+    model_info: &ModelInfo,
+) -> String {
+    let base_instructions = config
+        .base_instructions
+        .clone()
+        .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
+        .unwrap_or_else(|| model_info.get_model_instructions(config.personality));
+
+    codex_models_manager::model_info::normalize_base_instructions_for_model(
+        &model_info.slug,
+        &model_info.display_name,
+        &base_instructions,
+    )
 }
 
 pub(crate) fn emit_subagent_session_started(

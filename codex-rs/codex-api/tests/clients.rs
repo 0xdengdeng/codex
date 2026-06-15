@@ -10,6 +10,7 @@ use codex_api::AuthError;
 use codex_api::AuthProvider;
 use codex_api::Compression;
 use codex_api::Provider;
+use codex_api::ResponsesApiInputItem;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient;
 use codex_api::ResponsesOptions;
@@ -419,12 +420,12 @@ async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
     let request = ResponsesApiRequest {
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
-        input: vec![ResponseItem::Message {
+        input: vec![ResponsesApiInputItem::from(ResponseItem::Message {
             id: Some("msg_1".into()),
             role: "user".into(),
             content: vec![ContentItem::InputText { text: "hi".into() }],
             phase: None,
-        }],
+        })],
         tools: Vec::new(),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
