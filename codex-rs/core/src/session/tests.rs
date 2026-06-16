@@ -6409,9 +6409,17 @@ async fn handle_output_item_done_records_image_save_history_message() {
         tool_runtime: test_tool_runtime(Arc::clone(&session), Arc::clone(&turn_context)),
         cancellation_token: CancellationToken::new(),
     };
-    handle_output_item_done(&mut ctx, item.clone(), /*previously_active_item*/ None)
-        .await
-        .expect("image generation item should succeed");
+    let output =
+        handle_output_item_done(&mut ctx, item.clone(), /*previously_active_item*/ None)
+            .await
+            .expect("image generation item should succeed");
+
+    // A saved image must request a follow-up turn so the model can use/embed it
+    // or generate the next one instead of the turn dying right after the picture.
+    assert!(
+        output.needs_follow_up,
+        "a saved generated image should request a follow-up turn"
+    );
 
     let history = session.clone_history().await;
     let image_output_path = expected_saved_path.clone();
@@ -6489,9 +6497,17 @@ async fn handle_output_item_done_skips_image_save_message_when_save_fails() {
         tool_runtime: test_tool_runtime(Arc::clone(&session), Arc::clone(&turn_context)),
         cancellation_token: CancellationToken::new(),
     };
-    handle_output_item_done(&mut ctx, item.clone(), /*previously_active_item*/ None)
-        .await
-        .expect("image generation item should still complete");
+    let output =
+        handle_output_item_done(&mut ctx, item.clone(), /*previously_active_item*/ None)
+            .await
+            .expect("image generation item should still complete");
+
+    // No image was saved, so there is nothing for a follow-up turn to act on —
+    // the turn must not be forced to continue.
+    assert!(
+        !output.needs_follow_up,
+        "a failed image save must not request a follow-up turn"
+    );
 
     let history = session.clone_history().await;
     assert_eq!(history.raw_items(), &[item]);

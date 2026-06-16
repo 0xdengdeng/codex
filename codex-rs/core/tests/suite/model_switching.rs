@@ -786,7 +786,11 @@ async fn thread_rollback_after_generated_image_drops_entire_image_turn_history()
                 ev_image_generation_call("ig_rollback", "completed", "lobster", "Zm9v"),
                 ev_completed_with_tokens("resp-1", /*total_tokens*/ 10),
             ]),
+            // A generated image now requests a follow-up turn so the model can use
+            // or embed it; this empty completion ends that follow-up within the same
+            // image-generation turn.
             sse_completed("resp-2"),
+            sse_completed("resp-3"),
         ],
     )
     .await;
@@ -841,25 +845,27 @@ async fn thread_rollback_after_generated_image_drops_entire_image_turn_history()
     wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let requests = responses.requests();
-    assert_eq!(requests.len(), 2, "expected two model requests");
+    // The image turn now spans two requests (the image, then a forced follow-up),
+    // and "after rollback" is the third.
+    assert_eq!(requests.len(), 3, "expected three model requests");
 
-    let second_request = requests.last().expect("expected second request");
+    let after_rollback_request = requests.last().expect("expected after-rollback request");
     assert!(
-        !second_request
+        !after_rollback_request
             .message_input_texts("user")
             .iter()
             .any(|text| text == "generate a lobster"),
         "rollback should remove the rolled-back image-generation user turn"
     );
     assert!(
-        !second_request
+        !after_rollback_request
             .message_input_texts("developer")
             .iter()
             .any(|text| text.contains("Generated images are saved to")),
         "rollback should remove the generated-image save note with the rolled-back turn"
     );
     assert!(
-        second_request
+        after_rollback_request
             .inputs_of_type("image_generation_call")
             .is_empty(),
         "rollback should remove the generated image call with the rolled-back turn"

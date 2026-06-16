@@ -360,6 +360,19 @@ pub(crate) async fn handle_output_item_done(
             )
             .await;
             if let Some(turn_item) = turn_item {
+                // A generated image is a terminal response item: it carries no
+                // function_call_output, so it would otherwise end the turn the
+                // instant the picture lands. Request a follow-up turn whenever an
+                // image was actually saved (saved_path set) so the model gets a
+                // chance to use/embed it, generate the next one, or close with a
+                // final message instead of being cut off mid-plan. The loop still
+                // terminates naturally once the follow-up turn emits a non-image
+                // answer (needs_follow_up=false) or hits the token limit.
+                if let TurnItem::ImageGeneration(image_item) = &turn_item {
+                    if image_item.saved_path.is_some() {
+                        output.needs_follow_up = true;
+                    }
+                }
                 if previously_active_item.is_none() {
                     let mut started_item = turn_item.clone();
                     if let TurnItem::ImageGeneration(item) = &mut started_item {

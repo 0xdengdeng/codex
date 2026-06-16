@@ -146,7 +146,21 @@ async fn run_remote_compact_task_inner_impl(
     // compact endpoint. The checkpoint below records it separately from the next sampling request,
     // whose prompt will repeat current developer/context prefix items.
     let trace_input_history = history.raw_items().to_vec();
-    let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
+    let mut prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
+    // Image generation results are cleared from history to save context. Without
+    // refilling them from the local artifacts, the remote-compaction request ships
+    // store=false image_generation_call refs with empty results, which the gateway
+    // can only resolve from its short-lived image cache — once that expires the
+    // whole compaction turn fails. Mirror the normal sampling path
+    // (session/turn.rs): rehydrate from local bytes, then drop any that still have
+    // no result so the request never carries an unresolvable image ref.
+    crate::stream_events_utils::rehydrate_image_generation_results_from_artifacts(
+        &turn_context.config.codex_home,
+        &sess.conversation_id.to_string(),
+        &mut prompt_input,
+    )
+    .await;
+    crate::stream_events_utils::retain_image_generation_calls_with_results(&mut prompt_input);
     let tool_router = built_tools(
         sess.as_ref(),
         turn_context.as_ref(),

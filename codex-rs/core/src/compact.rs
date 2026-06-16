@@ -174,9 +174,20 @@ async fn run_compact_task_inner_impl(
 
     loop {
         // Clone is required because of the loop
-        let turn_input = history
+        let mut turn_input = history
             .clone()
             .for_prompt(&turn_context.model_info.input_modalities);
+        // See compact_remote.rs: refill image_generation_call results from local
+        // artifacts and drop any still-empty refs so the compaction request never
+        // ships an unresolvable store=false image ref that depends on the gateway's
+        // expiring image cache.
+        crate::stream_events_utils::rehydrate_image_generation_results_from_artifacts(
+            &turn_context.config.codex_home,
+            &sess.conversation_id.to_string(),
+            &mut turn_input,
+        )
+        .await;
+        crate::stream_events_utils::retain_image_generation_calls_with_results(&mut turn_input);
         let turn_input_len = turn_input.len();
         let prompt = Prompt {
             input: turn_input,
