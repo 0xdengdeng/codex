@@ -1,7 +1,6 @@
 use crate::JsonSchema;
 use crate::ResponsesApiTool;
 use crate::ToolSpec;
-use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Name of the converged image-generation function tool. Unlike the native
@@ -25,15 +24,16 @@ pub fn create_generate_image_tool() -> ToolSpec {
         ),
         (
             "size".to_string(),
-            JsonSchema::string_enum(
-                vec![
-                    Value::from("1024x1024"),
-                    Value::from("1536x1024"),
-                    Value::from("1024x1536"),
-                    Value::from("auto"),
-                ],
-                Some("Output image size; defaults to auto.".to_string()),
-            ),
+            // Free-form, not an enum: valid sizes differ per provider and a fixed
+            // enum advertised only small sizes that some image models reject.
+            // Omitting size lets the provider pick a valid default (verified on
+            // doubao + gpt-image), which is the recommended path.
+            JsonSchema::string(Some(
+                "Optional output image size. Omit to let the provider choose a valid \
+default (recommended). Accepted forms vary by model, e.g. WIDTHxHEIGHT, 1k, 2k, 4k, \
+or auto; some models require large sizes (>= ~2k)."
+                    .to_string(),
+            )),
         ),
         (
             "model".to_string(),
@@ -85,10 +85,10 @@ mod tests {
         assert_eq!(v["name"], GENERATE_IMAGE_TOOL_NAME);
         assert_eq!(v["parameters"]["type"], "object");
         assert_eq!(v["parameters"]["required"], json!(["prompt"]));
-        assert_eq!(
-            v["parameters"]["properties"]["size"]["enum"],
-            json!(["1024x1024", "1536x1024", "1024x1536", "auto"])
-        );
+        // size is a free-form optional string (no enum): valid sizes are
+        // provider-specific and omitting it picks a valid default.
+        assert_eq!(v["parameters"]["properties"]["size"]["type"], "string");
+        assert!(v["parameters"]["properties"]["size"].get("enum").is_none());
         // additionalProperties locked off so the model can't smuggle unknown args.
         assert_eq!(v["parameters"]["additionalProperties"], json!(false));
     }
