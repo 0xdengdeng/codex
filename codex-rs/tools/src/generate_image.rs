@@ -37,8 +37,15 @@ or auto; some models require large sizes (>= ~2k)."
         ),
         (
             "model".to_string(),
+            // The gateway resolves the image model from the request only (no
+            // tenant-side default), so the alias must be supplied here; omitting
+            // it fails the call. The active image-generation skill names the
+            // aliases available to the caller.
             JsonSchema::string(Some(
-                "Optional image model alias; omit for the tenant default.".to_string(),
+                "Image model alias to generate with (e.g. a seedream or gpt-image \
+alias your deployment exposes). Required: the gateway has no default image model, \
+so omitting this fails the call."
+                    .to_string(),
             )),
         ),
         (
