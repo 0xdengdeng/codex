@@ -311,6 +311,14 @@ fn generations_request_body(args: &GenerateImageArgs) -> JsonValue {
     if let Some(size) = args.size.as_deref() {
         body.insert("size".to_string(), JsonValue::String(size.to_string()));
     }
+    // Force inline base64. Verified on UAT: without it doubao-seedream returns a
+    // (signed, expiring) `url` instead of `b64_json`, which our save path can't
+    // consume; gpt-image returns b64 either way and accepts the param. So
+    // requesting b64_json makes the response shape uniform across providers.
+    body.insert(
+        "response_format".to_string(),
+        JsonValue::String("b64_json".to_string()),
+    );
     JsonValue::Object(body)
 }
 
@@ -601,6 +609,8 @@ mod tests {
         assert_eq!(body["prompt"], "a cat");
         assert!(body.get("model").is_none());
         assert!(body.get("size").is_none());
+        // response_format is always forced so providers return inline b64.
+        assert_eq!(body["response_format"], "b64_json");
     }
 
     use codex_utils_absolute_path::test_support::PathExt;
@@ -636,9 +646,12 @@ mod tests {
             .and(header("authorization", "Bearer sk-adg_test"))
             .and(header("x-adg-turn-id", "turn-xyz"))
             .and(header("x-adg-image-model", "doubao-seedream"))
-            .and(body_partial_json(
-                json!({ "prompt": "a gundam", "model": "doubao-seedream", "size": "1024x1024" }),
-            ))
+            .and(body_partial_json(json!({
+                "prompt": "a gundam",
+                "model": "doubao-seedream",
+                "size": "1024x1024",
+                "response_format": "b64_json",
+            })))
             // "Zm9v" decodes to b"foo"; the save path writes the decoded bytes.
             .respond_with(
                 ResponseTemplate::new(200)
