@@ -182,7 +182,7 @@ pub(crate) fn raw_assistant_output_text_from_item(item: &ResponseItem) -> Option
     None
 }
 
-async fn save_image_generation_result(
+pub(crate) async fn save_image_generation_result(
     codex_home: &AbsolutePathBuf,
     session_id: &str,
     call_id: &str,
