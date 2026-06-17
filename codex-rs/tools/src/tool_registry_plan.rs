@@ -29,6 +29,7 @@ use crate::create_close_agent_tool_v2;
 use crate::create_code_mode_tool;
 use crate::create_create_goal_tool;
 use crate::create_followup_task_tool;
+use crate::create_generate_image_tool;
 use crate::create_get_goal_tool;
 use crate::create_image_generation_tool;
 use crate::create_list_agents_tool;
@@ -387,6 +388,15 @@ pub fn build_tool_registry_plan(
             /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
+    }
+
+    if config.generate_image_tool {
+        plan.push_spec(
+            create_generate_image_tool(),
+            /*supports_parallel_tool_calls*/ false,
+            config.code_mode_enabled,
+        );
+        plan.register_handler("generate_image", ToolHandlerKind::GenerateImage);
     }
 
     if config.environment_mode.has_environment() {

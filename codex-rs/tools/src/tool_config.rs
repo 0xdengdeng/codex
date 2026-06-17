@@ -94,6 +94,7 @@ pub struct ToolsConfig {
     pub web_search_config: Option<WebSearchConfig>,
     pub web_search_tool_type: WebSearchToolType,
     pub image_gen_tool: bool,
+    pub generate_image_tool: bool,
     pub search_tool: bool,
     pub namespace_tools: bool,
     pub tool_suggest: bool,
@@ -175,6 +176,10 @@ impl ToolsConfig {
         let include_original_image_detail = can_request_original_image_detail(model_info);
         let include_image_gen_tool =
             *image_generation_tool_allowed && features.enabled(Feature::ImageGeneration);
+        // The converged function tool is provider-agnostic (the gateway routes to
+        // a capable account), so it gates on the feature alone — not on the
+        // provider's native image_generation capability.
+        let include_generate_image_tool = features.enabled(Feature::GenerateImageTool);
         let exec_permission_approvals_enabled = features.enabled(Feature::ExecPermissionApprovals);
         let request_permissions_tool_enabled = features.enabled(Feature::RequestPermissionsTool);
         let shell_command_backend =
@@ -229,6 +234,7 @@ impl ToolsConfig {
             web_search_config: None,
             web_search_tool_type: model_info.web_search_tool_type,
             image_gen_tool: include_image_gen_tool,
+            generate_image_tool: include_generate_image_tool,
             search_tool: include_search_tool,
             namespace_tools: true,
             tool_suggest: include_tool_suggest,

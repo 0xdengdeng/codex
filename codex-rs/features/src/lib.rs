@@ -188,6 +188,10 @@ pub enum Feature {
     ExternalMigration,
     /// Allow the model to invoke the built-in image generation tool.
     ImageGeneration,
+    /// Allow the model to invoke the converged `generate_image` function tool
+    /// (gateway-fulfilled via /v1/images). Default-off ahead of the cutover that
+    /// retires the provider-side image_generation heuristic.
+    GenerateImageTool,
     /// Allow prompting and installing missing MCP dependencies.
     SkillMcpDependencyInstall,
     /// Prompt for missing skill env var dependencies.
@@ -1002,6 +1006,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "image_generation",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::GenerateImageTool,
+        key: "generate_image_tool",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::SkillMcpDependencyInstall,

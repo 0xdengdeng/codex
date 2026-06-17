@@ -850,6 +850,51 @@ fn image_generation_tools_require_feature_and_provider_gate() {
 }
 
 #[test]
+fn generate_image_tool_gated_by_feature_and_provider_agnostic() {
+    let model_info = model_info();
+    let available_models = Vec::new();
+
+    // Default-off: the converged tool is absent unless the feature is enabled.
+    let default_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &Features::with_defaults(),
+        image_generation_tool_allowed: true,
+        web_search_mode: None,
+        session_source: SessionSource::Cli,
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (default_tools, _) = build_specs(&default_config, None, None, &[]);
+    assert_lacks_tool_name(&default_tools, "generate_image");
+
+    // Enabled even when the provider has no native image_generation capability
+    // (image_generation_tool_allowed = false): the gateway, not the provider,
+    // fulfils the call, so the tool gates on the feature alone.
+    let mut features = Features::with_defaults();
+    features.enable(Feature::GenerateImageTool);
+    let enabled_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_allowed: false,
+        web_search_mode: None,
+        session_source: SessionSource::Cli,
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (enabled_tools, handlers) = build_specs(&enabled_config, None, None, &[]);
+    assert_contains_tool_names(&enabled_tools, &["generate_image"]);
+    assert!(
+        handlers.contains(&ToolHandlerSpec {
+            name: ToolName::plain("generate_image"),
+            kind: ToolHandlerKind::GenerateImage,
+        }),
+        "generate_image handler must be registered when the tool is enabled"
+    );
+}
+
+#[test]
 fn web_search_mode_cached_sets_external_web_access_false() {
     let model_info = model_info();
     let features = Features::with_defaults();
