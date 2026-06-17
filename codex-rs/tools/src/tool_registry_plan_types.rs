@@ -20,6 +20,7 @@ pub enum ToolHandlerKind {
     DynamicTool,
     ExecCommand,
     FollowupTaskV2,
+    GenerateImage,
     GetGoal,
     ListAgentsV2,
     ListMcpResourceTemplates,

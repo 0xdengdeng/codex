@@ -96,6 +96,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
     use crate::tools::handlers::TestSyncHandler;
     use crate::tools::handlers::ToolSearchHandler;
     use crate::tools::handlers::UnavailableToolHandler;
+    use crate::tools::handlers::GenerateImageHandler;
     use crate::tools::handlers::UpdateGoalHandler;
     use crate::tools::handlers::ViewImageHandler;
     use crate::tools::handlers::WriteStdinHandler;
@@ -289,6 +290,9 @@ pub(crate) fn build_specs_with_discoverable_tools(
             }
             ToolHandlerKind::UpdateGoal => {
                 builder.register_handler(Arc::new(UpdateGoalHandler));
+            }
+            ToolHandlerKind::GenerateImage => {
+                builder.register_handler(Arc::new(GenerateImageHandler));
             }
             ToolHandlerKind::ViewImage => {
                 builder.register_handler(Arc::new(ViewImageHandler));

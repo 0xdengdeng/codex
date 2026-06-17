@@ -1,6 +1,7 @@
 pub(crate) mod agent_jobs;
 pub(crate) mod apply_patch;
 mod dynamic;
+mod generate_image;
 mod goal;
 mod mcp;
 mod mcp_resource;
@@ -38,6 +39,7 @@ pub use apply_patch::ApplyPatchHandler;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 pub use dynamic::DynamicToolHandler;
+pub use generate_image::GenerateImageHandler;
 pub use goal::CreateGoalHandler;
 pub use goal::GetGoalHandler;
 pub use goal::UpdateGoalHandler;
