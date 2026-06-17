@@ -20,6 +20,7 @@ use crate::tools::registry::ToolKind;
 use codex_login::default_client::create_client;
 use codex_tools::GENERATE_IMAGE_TOOL_NAME;
 use codex_tools::ToolName;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 /// Per-turn id header (§6.1): codex carries `turn_context.sub_id` so the ADG
 /// `/v1/images/*` endpoint can enforce the deterministic per-turn breaker.
@@ -223,15 +224,39 @@ async fn generate_via_images_api(
         ))
     })?;
 
+    fulfil_via_generations(
+        &base_url,
+        auth.to_auth_headers(),
+        &turn.sub_id,
+        &turn.config.codex_home,
+        &invocation.session.conversation_id.to_string(),
+        &invocation.call_id,
+        args,
+    )
+    .await
+}
+
+/// The networking core, decoupled from `TurnContext` so it can be exercised
+/// end-to-end against a local mock server. Sends the authenticated POST, then
+/// maps status/body to a §3b outcome; `Err` only on an unwritable codex_home.
+async fn fulfil_via_generations(
+    base_url: &str,
+    auth_headers: http::HeaderMap,
+    turn_id: &str,
+    codex_home: &AbsolutePathBuf,
+    session_id: &str,
+    call_id: &str,
+    args: &GenerateImageArgs,
+) -> Result<GenerateImageOutcome, FunctionCallError> {
     let url = format!("{}/images/generations", base_url.trim_end_matches('/'));
     let body = generations_request_body(args);
 
     let client = create_client();
     let mut request = client
         .post(&url)
-        .headers(auth.to_auth_headers())
+        .headers(auth_headers)
         .header("Content-Type", "application/json")
-        .header(ADG_TURN_ID_HEADER, turn.sub_id.as_str())
+        .header(ADG_TURN_ID_HEADER, turn_id)
         .json(&body)
         .timeout(IMAGE_GENERATION_TIMEOUT);
     if let Some(model) = args.model.as_deref() {
@@ -260,18 +285,14 @@ async fn generate_via_images_api(
         });
     };
 
-    let session_id = invocation.session.conversation_id.to_string();
-    let artifact_call_id = image_generation_artifact_call_id(&turn.sub_id, &invocation.call_id);
-    let saved_path = save_image_generation_result(
-        &turn.config.codex_home,
-        &session_id,
-        &artifact_call_id,
-        &b64,
-    )
-    .await
-    .map_err(|err| {
-        FunctionCallError::RespondToModel(format!("generate_image: failed to persist image: {err}"))
-    })?;
+    let artifact_call_id = image_generation_artifact_call_id(turn_id, call_id);
+    let saved_path = save_image_generation_result(codex_home, session_id, &artifact_call_id, &b64)
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "generate_image: failed to persist image: {err}"
+            ))
+        })?;
 
     Ok(GenerateImageOutcome::Generated {
         saved_path: saved_path.to_string_lossy().into_owned(),
@@ -580,5 +601,171 @@ mod tests {
         assert_eq!(body["prompt"], "a cat");
         assert!(body.get("model").is_none());
         assert!(body.get("size").is_none());
+    }
+
+    use codex_utils_absolute_path::test_support::PathExt;
+    use http::HeaderMap;
+    use http::HeaderValue;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::body_partial_json;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    fn bearer_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer sk-adg_test"),
+        );
+        headers
+    }
+
+    // End-to-end over a real HTTP round trip (wiremock): a 200 with b64_json must
+    // produce the exact authenticated request, persist the decoded bytes, and
+    // return a Generated outcome with a viewable data-URL. This exercises the
+    // request building, response parsing, and image save together — not just the
+    // pure helpers.
+    #[tokio::test]
+    async fn generations_success_sends_authed_request_saves_image_and_returns_generated() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .and(header("authorization", "Bearer sk-adg_test"))
+            .and(header("x-adg-turn-id", "turn-xyz"))
+            .and(header("x-adg-image-model", "doubao-seedream"))
+            .and(body_partial_json(
+                json!({ "prompt": "a gundam", "model": "doubao-seedream", "size": "1024x1024" }),
+            ))
+            // "Zm9v" decodes to b"foo"; the save path writes the decoded bytes.
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "data": [{ "b64_json": "Zm9v" }] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let codex_home = codex_home.path().abs();
+        let args = GenerateImageArgs {
+            prompt: "a gundam".to_string(),
+            size: Some("1024x1024".to_string()),
+            model: Some("doubao-seedream".to_string()),
+            reference_image_paths: None,
+        };
+
+        let outcome = fulfil_via_generations(
+            &format!("{}/v1", server.uri()),
+            bearer_headers(),
+            "turn-xyz",
+            &codex_home,
+            "session-1",
+            "call-1",
+            &args,
+        )
+        .await
+        .expect("fulfilment should not error on a writable codex_home");
+
+        match outcome {
+            GenerateImageOutcome::Generated {
+                saved_path,
+                image_url,
+                model,
+                ..
+            } => {
+                assert_eq!(image_url, "data:image/png;base64,Zm9v");
+                assert_eq!(model.as_deref(), Some("doubao-seedream"));
+                let bytes = std::fs::read(&saved_path).expect("saved image exists");
+                assert_eq!(bytes, b"foo");
+            }
+            other => panic!("expected generated, got {:?}", other.status_json()),
+        }
+    }
+
+    // A real 400 with a content-policy body must map to a terminal Refused
+    // outcome over the wire (not a tool error, not a retry).
+    #[tokio::test]
+    async fn generations_content_policy_4xx_maps_to_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": { "code": "content_policy_violation", "message": "blocked" }
+            })))
+            .mount(&server)
+            .await;
+
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let codex_home = codex_home.path().abs();
+        let args = GenerateImageArgs {
+            prompt: "x".to_string(),
+            size: None,
+            model: None,
+            reference_image_paths: None,
+        };
+
+        let outcome = fulfil_via_generations(
+            &format!("{}/v1", server.uri()),
+            bearer_headers(),
+            "turn-1",
+            &codex_home,
+            "session-1",
+            "call-1",
+            &args,
+        )
+        .await
+        .expect("4xx is an outcome, not an error");
+
+        match outcome {
+            GenerateImageOutcome::Refused { code, message } => {
+                assert_eq!(code, "content_policy_violation");
+                assert_eq!(message, "blocked");
+            }
+            other => panic!("expected refused, got {:?}", other.status_json()),
+        }
+    }
+
+    // A 200 whose body carries no b64 image must surface no_image_output rather
+    // than a fake success.
+    #[tokio::test]
+    async fn generations_200_without_image_maps_to_no_image_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "data": [{ "url": "http://x" }] })),
+            )
+            .mount(&server)
+            .await;
+
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let codex_home = codex_home.path().abs();
+        let args = GenerateImageArgs {
+            prompt: "x".to_string(),
+            size: None,
+            model: None,
+            reference_image_paths: None,
+        };
+
+        let outcome = fulfil_via_generations(
+            &format!("{}/v1", server.uri()),
+            bearer_headers(),
+            "turn-1",
+            &codex_home,
+            "session-1",
+            "call-1",
+            &args,
+        )
+        .await
+        .expect("no-image is an outcome, not an error");
+
+        match outcome {
+            GenerateImageOutcome::Failed { code, .. } => assert_eq!(code, "no_image_output"),
+            other => panic!("expected failed, got {:?}", other.status_json()),
+        }
     }
 }
