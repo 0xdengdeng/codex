@@ -202,7 +202,7 @@ impl ModelProviderInfo {
         }
     }
 
-    fn build_header_map(&self) -> CodexResult<HeaderMap> {
+    pub fn build_header_map(&self) -> CodexResult<HeaderMap> {
         let capacity = self.http_headers.as_ref().map_or(0, HashMap::len)
             + self.env_http_headers.as_ref().map_or(0, HashMap::len);
         let mut headers = HeaderMap::with_capacity(capacity);

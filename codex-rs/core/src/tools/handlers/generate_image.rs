@@ -24,10 +24,13 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 
 /// Per-turn id header (§6.1): codex carries `turn_context.sub_id` so the ADG
 /// `/v1/images/*` endpoint can enforce the deterministic per-turn breaker.
-const ADG_TURN_ID_HEADER: &str = "X-ADG-Turn-Id";
-/// Request-scoped image model channel (§2): for multipart `/edits` ADG cannot
-/// read the JSON body, so the chosen model rides this header on every call.
-const ADG_IMAGE_MODEL_HEADER: &str = "X-ADG-Image-Model";
+/// Lowercase because `HeaderName::from_static` requires it; HTTP header names
+/// are case-insensitive on the wire.
+const ADG_TURN_ID_HEADER: &str = "x-adg-turn-id";
+/// Request-scoped image model channel (§2): the chosen image model rides this
+/// header. The provider config (set by the client from the user's frontend
+/// selection) carries a default value; an explicit `model` arg overrides it.
+const ADG_IMAGE_MODEL_HEADER: &str = "x-adg-image-model";
 /// Image generation is a single request/response with no agent loop, but the
 /// upstream render itself can take tens of seconds (≈37s measured), so the
 /// timeout is generous relative to ordinary API calls.
@@ -224,10 +227,34 @@ async fn generate_via_images_api(
         ))
     })?;
 
+    // Base headers = auth + the provider's configured headers. The latter is how
+    // the client injects the user's frontend image-model selection: it sets
+    // X-ADG-Image-Model on the provider (static or env-backed), and an explicit
+    // `model` arg later overrides it. See ai-development-gateway
+    // docs/generate-image-function-tool-2026-06-17.zh.md §2/§7 (model is
+    // request-scoped — the gateway has no tenant default).
+    let mut base_headers = auth.to_auth_headers();
+    let provider_headers = turn.provider.info().build_header_map().map_err(|err| {
+        FunctionCallError::RespondToModel(format!(
+            "generate_image: provider headers are invalid: {err}"
+        ))
+    })?;
+    for (name, value) in provider_headers.iter() {
+        base_headers.insert(name.clone(), value.clone());
+    }
+
+    // Resolve the image model: an explicit tool arg wins, otherwise fall back to
+    // the provider's configured default (the client's frontend selection, set as
+    // the x-adg-image-model header). The JSON generations path resolves the
+    // model from the request *body*, so the resolved value must land there — the
+    // header alone is only read on the multipart edits path (§2).
+    let image_model = resolve_image_model(args.model.as_deref(), &provider_headers);
+
     fulfil_via_generations(
         &base_url,
-        auth.to_auth_headers(),
+        base_headers,
         &turn.sub_id,
+        image_model.as_deref(),
         &turn.config.codex_home,
         &invocation.session.conversation_id.to_string(),
         &invocation.call_id,
@@ -236,32 +263,72 @@ async fn generate_via_images_api(
     .await
 }
 
+/// An explicit tool arg wins; otherwise fall back to the provider's configured
+/// `x-adg-image-model` default (the client's frontend selection).
+fn resolve_image_model(
+    arg_model: Option<&str>,
+    provider_headers: &http::HeaderMap,
+) -> Option<String> {
+    arg_model
+        .map(str::to_string)
+        .filter(|model| !model.trim().is_empty())
+        .or_else(|| {
+            provider_headers
+                .get(ADG_IMAGE_MODEL_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string)
+        })
+}
+
+/// Final request headers: start from the base (auth + provider-configured
+/// headers, which may carry the client's default `x-adg-image-model`), then add
+/// content-type and the per-turn id, and let an explicit `model_override`
+/// replace the provider default. `insert` (not append) makes the override win.
+fn finalize_image_request_headers(
+    mut headers: http::HeaderMap,
+    turn_id: &str,
+    model_override: Option<&str>,
+) -> http::HeaderMap {
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
+    if let Ok(value) = http::HeaderValue::from_str(turn_id) {
+        headers.insert(http::HeaderName::from_static(ADG_TURN_ID_HEADER), value);
+    }
+    if let Some(model) = model_override
+        && let Ok(value) = http::HeaderValue::from_str(model)
+    {
+        headers.insert(http::HeaderName::from_static(ADG_IMAGE_MODEL_HEADER), value);
+    }
+    headers
+}
+
 /// The networking core, decoupled from `TurnContext` so it can be exercised
 /// end-to-end against a local mock server. Sends the authenticated POST, then
 /// maps status/body to a §3b outcome; `Err` only on an unwritable codex_home.
 async fn fulfil_via_generations(
     base_url: &str,
-    auth_headers: http::HeaderMap,
+    base_headers: http::HeaderMap,
     turn_id: &str,
+    image_model: Option<&str>,
     codex_home: &AbsolutePathBuf,
     session_id: &str,
     call_id: &str,
     args: &GenerateImageArgs,
 ) -> Result<GenerateImageOutcome, FunctionCallError> {
     let url = format!("{}/images/generations", base_url.trim_end_matches('/'));
-    let body = generations_request_body(args);
+    let body = generations_request_body(&args.prompt, image_model, args.size.as_deref());
+    let headers = finalize_image_request_headers(base_headers, turn_id, image_model);
 
     let client = create_client();
-    let mut request = client
+    let request = client
         .post(&url)
-        .headers(auth_headers)
-        .header("Content-Type", "application/json")
-        .header(ADG_TURN_ID_HEADER, turn_id)
+        .headers(headers)
         .json(&body)
         .timeout(IMAGE_GENERATION_TIMEOUT);
-    if let Some(model) = args.model.as_deref() {
-        request = request.header(ADG_IMAGE_MODEL_HEADER, model);
-    }
 
     let response = match request.send().await {
         Ok(response) => response,
@@ -297,18 +364,18 @@ async fn fulfil_via_generations(
     Ok(GenerateImageOutcome::Generated {
         saved_path: saved_path.to_string_lossy().into_owned(),
         size: args.size.clone(),
-        model: args.model.clone(),
+        model: image_model.map(str::to_string),
         image_url: format!("data:image/png;base64,{b64}"),
     })
 }
 
-fn generations_request_body(args: &GenerateImageArgs) -> JsonValue {
+fn generations_request_body(prompt: &str, model: Option<&str>, size: Option<&str>) -> JsonValue {
     let mut body = serde_json::Map::new();
-    body.insert("prompt".to_string(), JsonValue::String(args.prompt.clone()));
-    if let Some(model) = args.model.as_deref() {
+    body.insert("prompt".to_string(), JsonValue::String(prompt.to_string()));
+    if let Some(model) = model {
         body.insert("model".to_string(), JsonValue::String(model.to_string()));
     }
-    if let Some(size) = args.size.as_deref() {
+    if let Some(size) = size {
         body.insert("size".to_string(), JsonValue::String(size.to_string()));
     }
     // Force inline base64. Verified on UAT: without it doubao-seedream returns a
@@ -605,12 +672,62 @@ mod tests {
             model: None,
             reference_image_paths: None,
         };
-        let body = generations_request_body(&args);
+        let body = generations_request_body(&args.prompt, None, None);
         assert_eq!(body["prompt"], "a cat");
         assert!(body.get("model").is_none());
         assert!(body.get("size").is_none());
         // response_format is always forced so providers return inline b64.
         assert_eq!(body["response_format"], "b64_json");
+    }
+
+    #[test]
+    fn resolve_image_model_prefers_arg_then_provider_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::HeaderName::from_static("x-adg-image-model"),
+            HeaderValue::from_static("frontend-selected"),
+        );
+        // Explicit arg wins.
+        assert_eq!(
+            resolve_image_model(Some("tool-arg"), &headers).as_deref(),
+            Some("tool-arg")
+        );
+        // No arg -> provider default (the client's frontend selection).
+        assert_eq!(
+            resolve_image_model(None, &headers).as_deref(),
+            Some("frontend-selected")
+        );
+        // Neither -> None (the call will fail-fast at the gateway).
+        assert_eq!(resolve_image_model(None, &HeaderMap::new()), None);
+        // Blank arg is ignored, falls through to the provider default.
+        assert_eq!(
+            resolve_image_model(Some("  "), &headers).as_deref(),
+            Some("frontend-selected")
+        );
+    }
+
+    #[test]
+    fn explicit_model_overrides_provider_default_image_header() {
+        let mut base = HeaderMap::new();
+        base.insert(
+            http::HeaderName::from_static("x-adg-image-model"),
+            HeaderValue::from_static("provider-default-model"),
+        );
+        // No override -> the provider default (the user's frontend selection)
+        // is preserved.
+        let kept = finalize_image_request_headers(base.clone(), "turn-1", None);
+        assert_eq!(kept["x-adg-image-model"], "provider-default-model");
+        assert_eq!(kept["x-adg-turn-id"], "turn-1");
+        assert_eq!(kept[http::header::CONTENT_TYPE], "application/json");
+        // Explicit arg -> replaces (not appends to) the provider default.
+        let overridden =
+            finalize_image_request_headers(base, "turn-1", Some("model-from-tool-arg"));
+        let values: Vec<_> = overridden
+            .get_all("x-adg-image-model")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(values, vec!["model-from-tool-arg"]);
     }
 
     use codex_utils_absolute_path::test_support::PathExt;
@@ -674,6 +791,7 @@ mod tests {
             &format!("{}/v1", server.uri()),
             bearer_headers(),
             "turn-xyz",
+            Some("doubao-seedream"),
             &codex_home,
             "session-1",
             "call-1",
@@ -696,6 +814,52 @@ mod tests {
             }
             other => panic!("expected generated, got {:?}", other.status_json()),
         }
+    }
+
+    // The frontend-selection path: when the tool arg omits `model`, the
+    // provider-configured X-ADG-Image-Model (set by the client from the user's
+    // selection) must reach the gateway over the wire.
+    #[tokio::test]
+    async fn provider_default_image_model_is_sent_when_arg_omits_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            // The resolved image model must reach the gateway in BOTH the header
+            // and the JSON body (the generations path routes on the body model).
+            .and(header("x-adg-image-model", "frontend-selected-model"))
+            .and(body_partial_json(
+                json!({ "model": "frontend-selected-model" }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "data": [{ "b64_json": "Zm9v" }] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let codex_home = codex_home.path().abs();
+        let args = GenerateImageArgs {
+            prompt: "a cat".to_string(),
+            size: None,
+            model: None, // not specified by the tool call; resolved from provider default
+            reference_image_paths: None,
+        };
+
+        let outcome = fulfil_via_generations(
+            &format!("{}/v1", server.uri()),
+            bearer_headers(),
+            "turn-xyz",
+            Some("frontend-selected-model"),
+            &codex_home,
+            "session-1",
+            "call-1",
+            &args,
+        )
+        .await
+        .expect("fulfilment should not error");
+        assert!(matches!(outcome, GenerateImageOutcome::Generated { .. }));
     }
 
     // A real 400 with a content-policy body must map to a terminal Refused
@@ -724,6 +888,7 @@ mod tests {
             &format!("{}/v1", server.uri()),
             bearer_headers(),
             "turn-1",
+            None,
             &codex_home,
             "session-1",
             "call-1",
@@ -768,6 +933,7 @@ mod tests {
             &format!("{}/v1", server.uri()),
             bearer_headers(),
             "turn-1",
+            None,
             &codex_home,
             "session-1",
             "call-1",
