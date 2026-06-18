@@ -39,7 +39,7 @@ There is no built-in `OPENAI_API_KEY`, CLI fallback, or local script in this flo
 To **edit an existing image** (change an outfit, swap a background, restyle a scene) or derive a variant from it, pass `reference_image_paths`: a list of absolute paths to local image files (PNG/JPEG/WebP). The prompt then describes the change to apply to those images rather than a scene to create from scratch.
 
 - Use it whenever the user supplies a source image and wants it modified, or asks to keep a subject/identity while changing something around it ("same person, different outfit").
-- Describe what to change in the prompt and what to keep ("keep the same face and pose, change only the jacket to red"); identity/likeness is preserved well but is not pixel-locked.
+- Phrase the prompt as the **desired end state**, naming the new element directly ("she wears a bright red oversized hoodie and a grey beanie; keep her face, hair and background"). This applies the change far more reliably than a pure "keep everything, only change X" instruction, which some image models read as "reproduce the original". Identity/likeness is preserved well but is not pixel-locked.
 - Omit `reference_image_paths` for an ordinary text-to-image generation.
 - A path that cannot be read returns a terminal `failed` result with code `reference_image_unreadable` — fix the path or fall back to a prompt-only description.
 
