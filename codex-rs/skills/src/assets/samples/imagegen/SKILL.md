@@ -36,22 +36,27 @@ There is no built-in `OPENAI_API_KEY`, CLI fallback, or local script in this flo
 
 ## Reference images / editing
 
-`reference_image_paths` (editing or deriving variants from existing images) is **not yet available** in this flow; a call that sets it returns a terminal `failed` result. For now, describe the desired change in the prompt text instead of supplying a reference image, and tell the user if a true edit of an existing file is required.
+To **edit an existing image** (change an outfit, swap a background, restyle a scene) or derive a variant from it, pass `reference_image_paths`: a list of absolute paths to local image files (PNG/JPEG/WebP). The prompt then describes the change to apply to those images rather than a scene to create from scratch.
+
+- Use it whenever the user supplies a source image and wants it modified, or asks to keep a subject/identity while changing something around it ("same person, different outfit").
+- Describe what to change in the prompt and what to keep ("keep the same face and pose, change only the jacket to red"); identity/likeness is preserved well but is not pixel-locked.
+- Omit `reference_image_paths` for an ordinary text-to-image generation.
+- A path that cannot be read returns a terminal `failed` result with code `reference_image_unreadable` — fix the path or fall back to a prompt-only description.
 
 ## When to use
 - Generate a new image (concept art, product shot, cover, website hero, sprite, texture).
 - Generate a photorealistic, illustration, or stylized bitmap asset for the current task.
+- Edit an existing local image — change outfit/background/style or derive a variant — via `reference_image_paths`.
 - Produce several assets or variants — one `generate_image` call each.
 
 ## When not to use
 - Extending or matching an existing SVG/vector icon set, logo system, or illustration library inside the repo.
 - Creating simple shapes, diagrams, wireframes, or icons better produced directly in SVG, HTML/CSS, or canvas.
-- Editing an existing local image file (not yet supported — see above).
 - Any task where the user clearly wants deterministic code-native output instead of a generated bitmap.
 
 ## Workflow
 1. Confirm the task wants a generated bitmap (not vector/code-native output).
-2. Collect inputs: the prompt, any exact text to render verbatim, and constraints/avoid list.
+2. Collect inputs: the prompt, any exact text to render verbatim, constraints/avoid list, and — if editing an existing image — its absolute path for `reference_image_paths`.
 3. Decide model: omit `model` for the default; pass it only on an explicit request or a known-good alternate.
 4. Decide size: omit unless the user requires a specific dimension.
 5. Shape the prompt (see below). For a generic prompt, add tasteful detail only when it materially improves the result; for a detailed prompt, normalize it without inventing requirements.
