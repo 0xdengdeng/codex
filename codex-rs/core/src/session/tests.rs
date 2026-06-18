@@ -6414,11 +6414,13 @@ async fn handle_output_item_done_records_image_save_history_message() {
             .await
             .expect("image generation item should succeed");
 
-    // A saved image must request a follow-up turn so the model can use/embed it
-    // or generate the next one instead of the turn dying right after the picture.
+    // A saved image is already a complete user-visible result. Automatically
+    // forcing a follow-up turn can make image-capable providers keep generating
+    // images indefinitely; later user turns can still reuse the saved path from
+    // history.
     assert!(
-        output.needs_follow_up,
-        "a saved generated image should request a follow-up turn"
+        !output.needs_follow_up,
+        "a saved generated image must not force an automatic follow-up turn"
     );
 
     let history = session.clone_history().await;
