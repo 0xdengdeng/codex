@@ -1,6 +1,6 @@
 ---
 name: "imagegen"
-description: "Generate raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or product shots. Use when Codex should create a brand-new image and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas."
+description: "Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or product shots. Use when Codex should create a brand-new image, edit or transform an existing image (change an outfit, swap a background, restyle a scene, keep a subject's identity while changing what's around it), or derive visual variants from reference images, and the output should be a bitmap asset rather than repo-native code or vector. Do not use when the task is better handled by editing existing SVG/vector/code-native assets, extending an established icon or logo system, or building the visual directly in HTML/CSS/canvas."
 ---
 
 # Image Generation Skill
