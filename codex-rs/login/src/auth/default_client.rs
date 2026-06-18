@@ -16,6 +16,7 @@ use reqwest::header::USER_AGENT;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::time::Duration;
 
 /// Set this to add a suffix to the User-Agent string.
 ///
@@ -221,6 +222,13 @@ pub fn build_reqwest_client() -> reqwest::Client {
 /// this method directly.
 pub fn try_build_reqwest_client() -> Result<reqwest::Client, BuildCustomCaTransportError> {
     let mut builder = reqwest::Client::builder().default_headers(default_headers());
+    // Keep idle TCP connections alive so long, byte-silent requests survive
+    // intermediaries that reset idle flows. generate_image is the concrete
+    // trigger: the upstream render is a single request/response that can stay
+    // silent for tens of seconds (≈37-69s measured), which trips ~60s idle
+    // timeouts in proxies/tunnels/LBs and surfaces as a transport reset. A
+    // 20s keepalive probe starts well before any 60s cutoff.
+    builder = builder.tcp_keepalive(Duration::from_secs(20));
     if is_sandboxed() {
         builder = builder.no_proxy();
     }
