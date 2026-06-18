@@ -81,6 +81,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
     use crate::tools::handlers::CreateGoalHandler;
     use crate::tools::handlers::DynamicToolHandler;
     use crate::tools::handlers::ExecCommandHandler;
+    use crate::tools::handlers::GenerateImageHandler;
     use crate::tools::handlers::GetGoalHandler;
     use crate::tools::handlers::ListMcpResourceTemplatesHandler;
     use crate::tools::handlers::ListMcpResourcesHandler;
@@ -96,7 +97,6 @@ pub(crate) fn build_specs_with_discoverable_tools(
     use crate::tools::handlers::TestSyncHandler;
     use crate::tools::handlers::ToolSearchHandler;
     use crate::tools::handlers::UnavailableToolHandler;
-    use crate::tools::handlers::GenerateImageHandler;
     use crate::tools::handlers::UpdateGoalHandler;
     use crate::tools::handlers::ViewImageHandler;
     use crate::tools::handlers::WriteStdinHandler;
