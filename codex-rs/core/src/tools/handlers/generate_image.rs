@@ -169,27 +169,6 @@ impl ToolHandler for GenerateImageHandler {
         };
         let args: GenerateImageArgs = parse_arguments(&arguments)?;
 
-        // Reference-image editing routes to `/v1/images/edits` (multipart),
-        // which this build does not wire yet. Surface an explicit, terminal
-        // failure rather than silently dropping the reference images.
-        // `image_reference_unsupported` is a client-only code (the gateway never
-        // emits it), tracked as such in the §3b contract.
-        if args
-            .reference_image_paths
-            .as_ref()
-            .is_some_and(|paths| !paths.is_empty())
-        {
-            return Ok(GenerateImageOutput {
-                outcome: GenerateImageOutcome::Failed {
-                    code: "image_reference_unsupported".to_string(),
-                    message:
-                        "reference-image editing is not available yet; describe the desired change in the prompt instead"
-                            .to_string(),
-                    retryable: false,
-                },
-            });
-        }
-
         let outcome = generate_via_images_api(&invocation, &args).await?;
         Ok(GenerateImageOutput { outcome })
     }
@@ -249,18 +228,40 @@ async fn generate_via_images_api(
     // model from the request *body*, so the resolved value must land there — the
     // header alone is only read on the multipart edits path (§2).
     let image_model = resolve_image_model(args.model.as_deref(), &provider_headers);
+    let session_id = invocation.session.conversation_id.to_string();
 
-    fulfil_via_generations(
-        &base_url,
-        base_headers,
-        &turn.sub_id,
-        image_model.as_deref(),
-        &turn.config.codex_home,
-        &invocation.session.conversation_id.to_string(),
-        &invocation.call_id,
-        args,
-    )
-    .await
+    // Reference images turn this into an edit: route to the multipart
+    // `/v1/images/edits` endpoint. Text-only stays on `/v1/images/generations`.
+    let reference_paths = args
+        .reference_image_paths
+        .as_deref()
+        .unwrap_or_default();
+    if reference_paths.is_empty() {
+        fulfil_via_generations(
+            &base_url,
+            base_headers,
+            &turn.sub_id,
+            image_model.as_deref(),
+            &turn.config.codex_home,
+            &session_id,
+            &invocation.call_id,
+            args,
+        )
+        .await
+    } else {
+        fulfil_via_edits(
+            &base_url,
+            base_headers,
+            &turn.sub_id,
+            image_model.as_deref(),
+            &turn.config.codex_home,
+            &session_id,
+            &invocation.call_id,
+            args,
+            reference_paths,
+        )
+        .await
+    }
 }
 
 /// An explicit tool arg wins; otherwise fall back to the provider's configured
@@ -330,7 +331,80 @@ async fn fulfil_via_generations(
         .json(&body)
         .timeout(IMAGE_GENERATION_TIMEOUT);
 
-    let response = match request.send().await {
+    complete_images_response(
+        request.send().await,
+        codex_home,
+        session_id,
+        turn_id,
+        call_id,
+        args.size.clone(),
+        image_model,
+    )
+    .await
+}
+
+/// Reference-image edit: multipart POST to `/v1/images/edits` carrying the
+/// prompt plus each reference image. supply-core already implements this
+/// endpoint and returns the same response shape as generations, so the outcome
+/// handling is shared via `complete_images_response`.
+#[expect(clippy::too_many_arguments)]
+async fn fulfil_via_edits(
+    base_url: &str,
+    base_headers: http::HeaderMap,
+    turn_id: &str,
+    image_model: Option<&str>,
+    codex_home: &AbsolutePathBuf,
+    session_id: &str,
+    call_id: &str,
+    args: &GenerateImageArgs,
+    reference_paths: &[String],
+) -> Result<GenerateImageOutcome, FunctionCallError> {
+    let url = format!("{}/images/edits", base_url.trim_end_matches('/'));
+    let form =
+        match build_image_edit_form(&args.prompt, image_model, args.size.as_deref(), reference_paths)
+            .await
+        {
+            Ok(form) => form,
+            Err(outcome) => return Ok(outcome),
+        };
+
+    // Multipart sets its own Content-Type (with boundary), so unlike the JSON
+    // generations path we must not stamp application/json. The image model still
+    // rides the X-ADG-Image-Model header so the gateway resolves the edits route.
+    let headers = finalize_image_edit_headers(base_headers, turn_id, image_model);
+
+    let client = create_client();
+    let request = client
+        .post(&url)
+        .headers(headers)
+        .multipart(form)
+        .timeout(IMAGE_GENERATION_TIMEOUT);
+
+    complete_images_response(
+        request.send().await,
+        codex_home,
+        session_id,
+        turn_id,
+        call_id,
+        args.size.clone(),
+        image_model,
+    )
+    .await
+}
+
+/// Shared post-send handling for both image endpoints: map transport / non-2xx
+/// failures to §3b outcomes, extract the b64 image, and persist it. Returns
+/// `Err` only on an unwritable codex_home.
+async fn complete_images_response(
+    send_result: Result<reqwest::Response, reqwest::Error>,
+    codex_home: &AbsolutePathBuf,
+    session_id: &str,
+    turn_id: &str,
+    call_id: &str,
+    size: Option<String>,
+    image_model: Option<&str>,
+) -> Result<GenerateImageOutcome, FunctionCallError> {
+    let response = match send_result {
         Ok(response) => response,
         Err(err) => return Ok(transport_failure_outcome(&err)),
     };
@@ -363,10 +437,93 @@ async fn fulfil_via_generations(
 
     Ok(GenerateImageOutcome::Generated {
         saved_path: saved_path.to_string_lossy().into_owned(),
-        size: args.size.clone(),
+        size,
         model: image_model.map(str::to_string),
         image_url: format!("data:image/png;base64,{b64}"),
     })
+}
+
+/// Build the multipart form supply-core's `/v1/images/edits` parser expects:
+/// text fields (`prompt` / `model` / `size` / `response_format`) plus one
+/// `image` part per reference. An unreadable reference is a terminal `failed`
+/// outcome — the model supplied a bad path — rather than a hard error, so the
+/// model can correct the path or fall back to a prompt-only description.
+async fn build_image_edit_form(
+    prompt: &str,
+    model: Option<&str>,
+    size: Option<&str>,
+    reference_paths: &[String],
+) -> Result<reqwest::multipart::Form, GenerateImageOutcome> {
+    let mut form = reqwest::multipart::Form::new()
+        .text("prompt", prompt.to_string())
+        .text("response_format", "b64_json");
+    if let Some(model) = model {
+        form = form.text("model", model.to_string());
+    }
+    if let Some(size) = size {
+        form = form.text("size", size.to_string());
+    }
+    for path in reference_paths {
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return Err(GenerateImageOutcome::Failed {
+                    code: "reference_image_unreadable".to_string(),
+                    message: format!("could not read reference image {path}: {err}"),
+                    retryable: false,
+                });
+            }
+        };
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image")
+            .to_string();
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str(image_part_mime(path))
+            .map_err(|err| GenerateImageOutcome::Failed {
+                code: "reference_image_invalid".to_string(),
+                message: format!("invalid reference image {path}: {err}"),
+                retryable: false,
+            })?;
+        form = form.part("image", part);
+    }
+    Ok(form)
+}
+
+/// Like `finalize_image_request_headers` but for the multipart edits path:
+/// carries the per-turn id and the image-model header, and deliberately omits
+/// Content-Type — reqwest's multipart layer sets it, including the boundary.
+fn finalize_image_edit_headers(
+    mut headers: http::HeaderMap,
+    turn_id: &str,
+    model_override: Option<&str>,
+) -> http::HeaderMap {
+    if let Ok(value) = http::HeaderValue::from_str(turn_id) {
+        headers.insert(http::HeaderName::from_static(ADG_TURN_ID_HEADER), value);
+    }
+    if let Some(model) = model_override
+        && let Ok(value) = http::HeaderValue::from_str(model)
+    {
+        headers.insert(http::HeaderName::from_static(ADG_IMAGE_MODEL_HEADER), value);
+    }
+    headers
+}
+
+/// Map a reference path's extension to the image MIME the providers accept.
+/// Defaults to PNG (the dominant case and a safe fallback).
+fn image_part_mime(path: &str) -> &'static str {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    }
 }
 
 fn generations_request_body(prompt: &str, model: Option<&str>, size: Option<&str>) -> JsonValue {
@@ -944,6 +1101,104 @@ mod tests {
 
         match outcome {
             GenerateImageOutcome::Failed { code, .. } => assert_eq!(code, "no_image_output"),
+            other => panic!("expected failed, got {:?}", other.status_json()),
+        }
+    }
+
+    // Reference images switch to the multipart /v1/images/edits endpoint. The
+    // request must carry auth + per-turn + image-model headers and a
+    // multipart/form-data body, and a 200 persists the decoded image exactly
+    // like generations (shared via complete_images_response).
+    #[tokio::test]
+    async fn edits_with_reference_image_sends_multipart_and_returns_generated() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/edits"))
+            .and(header("authorization", "Bearer sk-adg_test"))
+            .and(header("x-adg-turn-id", "turn-edit"))
+            .and(header("x-adg-image-model", "gpt-image"))
+            .and(wiremock::matchers::header_regex(
+                "content-type",
+                "^multipart/form-data",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "data": [{ "b64_json": "Zm9v" }] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let workdir = tempfile::tempdir().expect("workdir");
+        let ref_path = workdir.path().join("ref.png");
+        std::fs::write(&ref_path, b"original-bytes").expect("write reference");
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let codex_home = codex_home.path().abs();
+        let args = GenerateImageArgs {
+            prompt: "change the outfit".to_string(),
+            size: None,
+            model: Some("gpt-image".to_string()),
+            reference_image_paths: Some(vec![ref_path.to_string_lossy().into_owned()]),
+        };
+
+        let outcome = fulfil_via_edits(
+            &format!("{}/v1", server.uri()),
+            bearer_headers(),
+            "turn-edit",
+            Some("gpt-image"),
+            &codex_home,
+            "session-1",
+            "call-1",
+            &args,
+            args.reference_image_paths.as_deref().unwrap(),
+        )
+        .await
+        .expect("edit fulfilment should not error on a writable codex_home");
+
+        match outcome {
+            GenerateImageOutcome::Generated { saved_path, .. } => {
+                let bytes = std::fs::read(&saved_path).expect("saved image exists");
+                assert_eq!(bytes, b"foo");
+            }
+            other => panic!("expected generated, got {:?}", other.status_json()),
+        }
+    }
+
+    // A reference path that cannot be read is a terminal `failed` outcome (the
+    // model passed a bad path) and never reaches the network.
+    #[tokio::test]
+    async fn edits_with_unreadable_reference_returns_failed_without_request() {
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let codex_home = codex_home.path().abs();
+        let args = GenerateImageArgs {
+            prompt: "change the outfit".to_string(),
+            size: None,
+            model: Some("gpt-image".to_string()),
+            reference_image_paths: Some(vec!["/nonexistent/does-not-exist.png".to_string()]),
+        };
+
+        let outcome = fulfil_via_edits(
+            // Unreachable base_url: the form build fails first, so nothing is sent.
+            "http://127.0.0.1:1/v1",
+            bearer_headers(),
+            "turn-edit",
+            Some("gpt-image"),
+            &codex_home,
+            "session-1",
+            "call-1",
+            &args,
+            args.reference_image_paths.as_deref().unwrap(),
+        )
+        .await
+        .expect("unreadable reference is an outcome, not an error");
+
+        match outcome {
+            GenerateImageOutcome::Failed {
+                code, retryable, ..
+            } => {
+                assert_eq!(code, "reference_image_unreadable");
+                assert!(!retryable);
+            }
             other => panic!("expected failed, got {:?}", other.status_json()),
         }
     }

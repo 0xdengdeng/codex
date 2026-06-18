@@ -110,6 +110,10 @@ impl CodexRequestBuilder {
         self.map(|builder| builder.body(body))
     }
 
+    pub fn multipart(self, form: reqwest::multipart::Form) -> Self {
+        self.map(|builder| builder.multipart(form))
+    }
+
     pub async fn send(self) -> Result<Response, reqwest::Error> {
         let headers = trace_headers();
 
