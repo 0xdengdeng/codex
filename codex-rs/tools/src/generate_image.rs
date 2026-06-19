@@ -37,14 +37,16 @@ or auto; some models require large sizes (>= ~2k)."
         ),
         (
             "model".to_string(),
-            // The gateway resolves the image model from the request only (no
-            // tenant-side default), so the alias must be supplied here; omitting
-            // it fails the call. The active image-generation skill names the
-            // aliases available to the caller.
+            // Optional. Omitting it makes the gateway use the deployment's
+            // configured default image model (the client's selection, carried on
+            // the x-adg-image-model provider header) — the normal path. An
+            // explicit alias here overrides that default.
             JsonSchema::string(Some(
-                "Image model alias to generate with (e.g. a seedream or gpt-image \
-alias your deployment exposes). Required: the gateway has no default image model, \
-so omitting this fails the call."
+                "Optional image model alias. OMIT it to use the deployment's default \
+image model (the one the user selected in the client) — this is the normal path for \
+an ordinary image request. Pass an explicit alias only when the user asks for a \
+specific model, or a previous call returned model_not_found and you know a valid \
+alias your deployment exposes."
                     .to_string(),
             )),
         ),
