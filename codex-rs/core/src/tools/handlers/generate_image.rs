@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -439,8 +441,32 @@ async fn complete_images_response(
         saved_path: saved_path.to_string_lossy().into_owned(),
         size,
         model: image_model.map(str::to_string),
-        image_url: format!("data:image/png;base64,{b64}"),
+        image_url: format!("data:{};base64,{b64}", sniff_image_data_url_mime(&b64)),
     })
+}
+
+/// Pick the data-URL MIME from the decoded magic bytes instead of assuming PNG.
+/// Providers return different formats (doubao seedream → JPEG, gpt-image → PNG);
+/// labeling a JPEG as `image/png` can make strict downstream decoders reject the
+/// image so the model never actually perceives its own output. Decodes only the
+/// short prefix needed for the signature and falls back to PNG when unknown.
+fn sniff_image_data_url_mime(b64: &str) -> &'static str {
+    let trimmed = b64.trim();
+    let prefix_len = (trimmed.len().min(24) / 4) * 4;
+    let Ok(bytes) = BASE64_STANDARD.decode(&trimmed[..prefix_len]) else {
+        return "image/png";
+    };
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "image/png"
+    }
 }
 
 /// Build the multipart form supply-core's `/v1/images/edits` parser expects:
@@ -727,6 +753,20 @@ mod tests {
             }
             _ => panic!("expected status text"),
         }
+    }
+
+    #[test]
+    fn sniff_image_data_url_mime_detects_format_from_magic() {
+        let png = BASE64_STANDARD.encode([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]);
+        let jpeg = BASE64_STANDARD.encode([0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F', 0, 1]);
+        let webp = BASE64_STANDARD.encode(*b"RIFF\x00\x00\x00\x00WEBPVP8 ");
+        let gif = BASE64_STANDARD.encode(*b"GIF89a\x01\x00\x01\x00\x00\x00");
+        assert_eq!(sniff_image_data_url_mime(&png), "image/png");
+        assert_eq!(sniff_image_data_url_mime(&jpeg), "image/jpeg");
+        assert_eq!(sniff_image_data_url_mime(&webp), "image/webp");
+        assert_eq!(sniff_image_data_url_mime(&gif), "image/gif");
+        // Unrecognizable / undecodable prefixes fall back to PNG (prior behavior).
+        assert_eq!(sniff_image_data_url_mime("not-valid-@@"), "image/png");
     }
 
     #[test]
