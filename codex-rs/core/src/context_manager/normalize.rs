@@ -292,9 +292,14 @@ where
 
 /// Strip image content from messages and tool outputs when the model does not support images.
 /// When `input_modalities` contains `InputModality::Image`, no stripping is performed.
+///
+/// `image_generation_call` results are intentionally never stripped: they are the
+/// model's own *output*, not user-supplied input, and clearing them leaves a bare
+/// store=false reference that the gateway can no longer resolve once its short-lived
+/// image-context cache expires — breaking replay of older threads that contain
+/// generated images.
 pub(crate) fn strip_images_when_unsupported(
     input_modalities: &[InputModality],
-    preserve_image_generation_results: bool,
     items: &mut [ResponseItem],
 ) {
     let supports_images = input_modalities.contains(&InputModality::Image);
@@ -336,11 +341,6 @@ pub(crate) fn strip_images_when_unsupported(
                     }
                     *content_items = normalized_content_items;
                 }
-            }
-            ResponseItem::ImageGenerationCall { result, .. }
-                if !preserve_image_generation_results =>
-            {
-                result.clear();
             }
             _ => {}
         }

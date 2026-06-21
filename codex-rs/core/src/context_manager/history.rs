@@ -121,18 +121,17 @@ impl ContextManager {
         self.items
     }
 
-    /// Returns prompt history while preserving native image generation results.
+    /// Returns prompt history; an alias of [`Self::for_prompt`].
     ///
-    /// This is used when the native `image_generation` tool is available even if
-    /// the main text model does not accept user image attachments.
+    /// Image generation results are now always preserved (see
+    /// [`normalize::strip_images_when_unsupported`]), so this no longer differs from
+    /// `for_prompt`. Kept as a distinct entry point for the image-tool turn path,
+    /// which still rehydrates results from on-disk artifacts afterwards.
     pub(crate) fn for_prompt_preserving_image_generation_results(
         mut self,
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItem> {
-        self.normalize_history_with_options(
-            input_modalities,
-            /*preserve_image_generation_results*/ true,
-        );
+        self.normalize_history(input_modalities);
         self.items
     }
 
@@ -374,29 +373,15 @@ impl ContextManager {
     /// 2. every output has a corresponding call entry
     /// 3. when images are unsupported, image content is stripped from messages and tool outputs
     fn normalize_history(&mut self, input_modalities: &[InputModality]) {
-        self.normalize_history_with_options(
-            input_modalities,
-            /*preserve_image_generation_results*/ false,
-        );
-    }
-
-    fn normalize_history_with_options(
-        &mut self,
-        input_modalities: &[InputModality],
-        preserve_image_generation_results: bool,
-    ) {
         // all function/tool calls must have a corresponding output
         normalize::ensure_call_outputs_present(&mut self.items);
 
         // all outputs must have a corresponding function/tool call
         normalize::remove_orphan_outputs(&mut self.items);
 
-        // strip images when model does not support them
-        normalize::strip_images_when_unsupported(
-            input_modalities,
-            preserve_image_generation_results,
-            &mut self.items,
-        );
+        // strip unsupported input images when the model does not support them
+        // (image_generation_call results are output and are always preserved)
+        normalize::strip_images_when_unsupported(input_modalities, &mut self.items);
     }
 
     fn process_item(&self, item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {

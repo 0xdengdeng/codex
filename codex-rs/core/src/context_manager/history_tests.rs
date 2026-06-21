@@ -558,7 +558,11 @@ fn for_prompt_preserves_image_generation_result_when_images_are_supported() {
 }
 
 #[test]
-fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
+fn for_prompt_preserves_image_generation_result_even_when_images_are_unsupported() {
+    // The image_generation_call result is the model's own output, not user input.
+    // It must survive even for text-only input models: clearing it leaves a bare
+    // store=false reference the gateway can no longer resolve after its image-context
+    // cache expires, which breaks replay of older threads containing generated images.
     let history = create_history_with_items(vec![
         ResponseItem::Message {
             id: None,
@@ -595,7 +599,7 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
                 model: None,
                 size: None,
                 revised_prompt: Some("lobster".to_string()),
-                result: String::new(),
+                result: "Zm9v".to_string(),
             },
         ]
     );
