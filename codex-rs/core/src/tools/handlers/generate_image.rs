@@ -34,9 +34,9 @@ const ADG_TURN_ID_HEADER: &str = "x-adg-turn-id";
 /// selection) carries a default value; an explicit `model` arg overrides it.
 const ADG_IMAGE_MODEL_HEADER: &str = "x-adg-image-model";
 /// Image generation is a single request/response with no agent loop, but the
-/// upstream render itself can take tens of seconds (≈37s measured), so the
-/// timeout is generous relative to ordinary API calls.
-const IMAGE_GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
+/// upstream render can exceed two minutes, so keep the client budget below the
+/// gateway's 300-second infrastructure ceiling while allowing slow renders.
+const IMAGE_GENERATION_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub struct GenerateImageHandler;
 
@@ -937,6 +937,11 @@ mod tests {
     use wiremock::matchers::header;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
+
+    #[test]
+    fn image_generation_request_budget_is_three_minutes() {
+        assert_eq!(IMAGE_GENERATION_TIMEOUT, Duration::from_secs(180));
+    }
 
     fn bearer_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
